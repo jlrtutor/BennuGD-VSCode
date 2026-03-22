@@ -1,0 +1,51 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "BennuGD",
+	"patterns": [
+		{
+			"include": "#keywords"
+		}
+	],
+	"repository": {
+		"keywords": {
+			"patterns": [{
+				"name": "keyword.control.bennugd",
+				"match": "\\b(process|private|public|global|local|begin|end|loop|frame|if|else|while|for|wstich|case|break|return)\\b"
+			},
+			{
+				"name": "variable.language.bennugd",
+				"match": "\\b(int|float|string)\\b"
+			},
+		{
+			"name": "comment.line.bennugd",
+			"match": "//.*$"
+		},
+			{
+				"name": "comment.block.bennugd",
+				"begin": "/\\*",
+				"end": "\\*/"
+			},
+			{
+				"name": "string.quoted.double.bennugd",
+				"begin": "\"",
+				"end": "\"",
+				"patterns": [
+					{
+						"name": "constant.character.escape.bennugd",
+						"match": "\\\\."
+					}
+				]
+			},
+			{
+				"name": "constant.numeric.bennugd",
+				"match": "\\b\\d+(\\.\\d+)?\\b"
+			},
+			{
+  				"name": "support.function.bennugd",
+  				"match": "\\b(write|load|unload|say|rand|abs)\\b"
+			}]
+		}
+	},
+	"scopeName": "source.bennugd",
+	"fileTypes": [".prg", ".inc", ".bgd", ".bgn"]
+}

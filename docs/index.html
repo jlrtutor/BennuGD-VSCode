@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="BennuGD2 for VSCode 2026: install, configure paths, compile, and compile+run with keyboard shortcuts."
+    />
+    <title>BennuGD2 for VSCode 2026</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #070d13;
+        --bg-2: #0e1620;
+        --panel: rgba(19, 29, 42, 0.86);
+        --line: rgba(146, 169, 198, 0.22);
+        --text: #ecf3ff;
+        --muted: #9fb0c7;
+        --accent: #7dd3fc;
+        --accent-2: #22d3ee;
+        --brand: #f8fafc;
+        --ok: #34d399;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Space Grotesk", "Segoe UI", system-ui, -apple-system, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(1200px 600px at 10% -10%, rgba(125, 211, 252, 0.18), transparent 50%),
+          radial-gradient(900px 500px at 90% 0%, rgba(34, 211, 238, 0.14), transparent 50%),
+          linear-gradient(180deg, #07111b 0%, #070d13 52%, #05080d 100%);
+      }
+
+      .wrap {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 30px 0 80px;
+      }
+
+      .top {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-bottom: 18px;
+      }
+
+      .brand {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .brand img {
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+      }
+
+      .brand strong {
+        font-size: 1.02rem;
+        display: block;
+      }
+
+      .brand span {
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+
+      .links {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .button {
+        text-decoration: none;
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: rgba(255, 255, 255, 0.04);
+        font-weight: 600;
+      }
+
+      .button.primary {
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: #06101a;
+        border-color: transparent;
+      }
+
+      .hero {
+        margin-top: 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        padding: 30px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2.2rem, 6vw, 4.4rem);
+        line-height: 0.96;
+        letter-spacing: -0.04em;
+      }
+
+      .sub {
+        margin-top: 14px;
+        color: #d9e6fa;
+        max-width: 72ch;
+      }
+
+      .meta {
+        margin-top: 18px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .badge {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 7px 12px;
+        color: #d9e6fa;
+        font-size: 0.9rem;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 16px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 18px;
+      }
+
+      .card h2 {
+        margin: 0 0 10px 0;
+        font-size: 1.1rem;
+      }
+
+      .card p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .span-4 { grid-column: span 4; }
+      .span-6 { grid-column: span 6; }
+      .span-8 { grid-column: span 8; }
+      .span-12 { grid-column: span 12; }
+
+      .steps {
+        display: grid;
+        gap: 10px;
+      }
+
+      .step {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .step strong {
+        color: var(--brand);
+      }
+
+      .kbd {
+        font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-bottom-width: 2px;
+        border-radius: 8px;
+        padding: 2px 8px;
+        background: rgba(255, 255, 255, 0.06);
+        white-space: nowrap;
+      }
+
+      pre {
+        margin: 0;
+        overflow: auto;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: #050b14;
+        color: #d9e6fa;
+        padding: 14px;
+        font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.9rem;
+      }
+
+      .ok {
+        color: var(--ok);
+        font-weight: 600;
+      }
+
+      footer {
+        margin-top: 20px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 960px) {
+        .span-4,
+        .span-6,
+        .span-8 {
+          grid-column: span 12;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <div class="top">
+        <div class="brand">
+          <img src="../assets/icon.png" alt="BennuGD2 for VSCode 2026 logo" />
+          <div>
+            <strong>BennuGD2 for VSCode 2026</strong>
+            <span>2026 release by LazySoftware.es</span>
+          </div>
+        </div>
+        <div class="links">
+          <a class="button primary" href="https://lazysoftware.es" target="_blank" rel="noreferrer">LazySoftware.es</a>
+          <a class="button" href="https://github.com/jlrtutor/BennuGD-VSCode" target="_blank" rel="noreferrer">Extension Repository</a>
+          <a class="button" href="https://github.com/jlrtutor/BennuGD-VSCode/issues" target="_blank" rel="noreferrer">Report Issue</a>
+        </div>
+      </div>
+
+      <section class="hero">
+        <h1>Build BennuGD2 Projects Faster</h1>
+        <p class="sub">
+          VS Code extension focused on BennuGD2 workflow: install, configure paths, compile, and compile+run with one shortcut.
+          Includes v1 compatibility and LSP support based on Bennu source exports.
+        </p>
+        <div class="meta">
+          <span class="badge">VS Code Extension</span>
+          <span class="badge">BennuGD2 First</span>
+          <span class="badge">LSP + Compile + Run</span>
+          <span class="badge">Created in 2026</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card span-8">
+          <h2>Activation Flow (Recommended)</h2>
+          <div class="steps">
+            <div class="step"><strong>1.</strong> Clone project:
+              <pre style="margin-top:8px;">git clone https://github.com/jlrtutor/BennuGD-VSCode.git
+cd BennuGD-VSCode</pre>
+            </div>
+            <div class="step"><strong>2.</strong> Build and package:
+              <pre style="margin-top:8px;">npm install
+npm run compile
+npx @vscode/vsce package</pre>
+            </div>
+            <div class="step"><strong>3.</strong> In VS Code go to <code>Extensions</code> > <code>...</code> > <code>Install from VSIX...</code> and select <code>bennugd-vscode-support-1.0.1.vsix</code>.</div>
+            <div class="step"><strong>4.</strong> Open <code>Settings</code> and run <code>BennuGD: Configure Paths...</code>.</div>
+            <div class="step"><strong>5.</strong> Set <code>Source root</code>, <code>Compiler path</code> and <code>Runtime path</code> to BennuGD binary folders or exact binaries.</div>
+            <div class="step"><strong>6.</strong> Open your BennuGD project and run <code>BennuGD: Compile and Run Current File</code> from the command palette.</div>
+            <div class="step"><strong>7.</strong> Keyboard shortcuts: <span class="kbd">Ctrl+Alt+B</span> / <span class="kbd">Cmd+Alt+B</span> (compile), <span class="kbd">Ctrl+Alt+R</span> / <span class="kbd">Cmd+Alt+R</span> (compile + run).</div>
+          </div>
+        </article>
+
+        <article class="card span-4">
+          <h2>What You Get</h2>
+          <p>
+            <span class="ok">-</span> BennuGD2 syntax by default<br />
+            <span class="ok">-</span> BennuGD v1 language mode<br />
+            <span class="ok">-</span> Hover, completion, definitions<br />
+            <span class="ok">-</span> Diagnostics and compile output<br />
+            <span class="ok">-</span> Configure panel with Browse buttons
+          </p>
+        </article>
+
+        <article class="card span-6">
+          <h2>Example Settings (BennuGD2, macOS arm64)</h2>
+          <p style="margin-bottom: 10px;">
+            Apple Silicon binaries reference:
+            <a href="https://github.com/jlrtutor/BennuGD2" target="_blank" rel="noreferrer">github.com/jlrtutor/BennuGD2</a>
+          </p>
+          <pre>{
+  "bennugd.defaultVersion": "v2",
+  "bennugd.v2.sourceRoot": "&lt;BENNUGD2_ROOT&gt;",
+  "bennugd.v2.compilerPath": "&lt;BENNUGD2_ROOT&gt;/build/macos-arm64/bin/bgdc",
+  "bennugd.v2.runtimePath": "&lt;BENNUGD2_ROOT&gt;/build/macos-arm64/bin/bgdi"
+}</pre>
+        </article>
+
+        <article class="card span-6">
+          <h2>Build and Package</h2>
+          <pre>npm install
+npm run compile
+npx @vscode/vsce package</pre>
+        </article>
+
+        <article class="card span-12">
+          <h2>Help: npm Not Installed</h2>
+          <p>
+            If you get <code>npm: command not found</code>, install Node.js LTS first (npm is included).
+            Official download: <a href="https://nodejs.org/en/download" target="_blank" rel="noreferrer">nodejs.org/en/download</a>.
+          </p>
+          <pre style="margin-top: 10px;"># Verify installation
+node -v
+npm -v
+
+# macOS (Homebrew)
+brew install node
+
+# Windows (PowerShell + winget)
+winget install OpenJS.NodeJS.LTS
+
+# Ubuntu/Debian
+sudo apt update
+sudo apt install -y nodejs npm
+
+# Fedora
+sudo dnf install -y nodejs npm
+
+# Arch
+sudo pacman -S nodejs npm</pre>
+        </article>
+
+        <article class="card span-12">
+          <h2>Credits</h2>
+          <p>
+            Special thanks to <strong>Rufidj</strong> (existing BennuGD2 VS Code extension) for prior work and reference ideas.
+            Thanks to <strong>SplinterGU</strong> and all <strong>BennuGD/BennuGD2 contributors</strong> for the engine and ecosystem.
+            This extension is created and maintained by <strong>LazySoftware.es</strong>.
+          </p>
+        </article>
+      </section>
+
+      <footer>
+        Website: <a href="https://lazysoftware.es" target="_blank" rel="noreferrer">lazysoftware.es</a> ·
+        Repository: <a href="https://github.com/jlrtutor/BennuGD-VSCode" target="_blank" rel="noreferrer">github.com/jlrtutor/BennuGD-VSCode</a>
+      </footer>
+    </main>
+  </body>
+</html>

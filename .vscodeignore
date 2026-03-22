@@ -1,0 +1,14 @@
+.vscode/**
+.git/**
+.gitignore
+docs/**
+templates/**
+server/src/**
+client/src/**
+**/*.ts
+**/*.map
+**/*.pyc
+**/__pycache__/**
+
+
+assets/bennugd-official-reference.png

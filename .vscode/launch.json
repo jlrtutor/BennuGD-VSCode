@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}"
+      ],
+      "preLaunchTask": "npm: compile",
+      "outFiles": [
+        "${workspaceFolder}/client/out/**/*.js",
+        "${workspaceFolder}/server/out/**/*.js"
+      ]
+    }
+  ]
+}

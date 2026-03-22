@@ -1,0 +1,289 @@
+{
+  "name": "bennugd-vscode-support",
+  "displayName": "BennuGD2 for VSCode 2026",
+  "description": "BennuGD2 for VSCode 2026: LSP, syntax highlighting, compile and run commands",
+  "version": "1.0.1",
+  "publisher": "lazysoftware",
+  "icon": "assets/icon.png",
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "keywords": [
+    "bennugd",
+    "bennugd2",
+    "bgdc",
+    "bgdi",
+    "gamedev",
+    "lazysoftware"
+  ],
+  "categories": [
+    "Programming Languages"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jlrtutor/BennuGD-VSCode.git"
+  },
+  "homepage": "https://lazysoftware.es",
+  "bugs": {
+    "url": "https://github.com/jlrtutor/BennuGD-VSCode/issues"
+  },
+  "activationEvents": [
+    "onLanguage:bennugd",
+    "onLanguage:bennugd2",
+    "onCommand:bennugd.compileCurrentFile",
+    "onCommand:bennugd.runCurrentFile",
+    "onCommand:bennugd.compileAndRunCurrentFile",
+    "onCommand:bennugd.compileCurrentFileV1",
+    "onCommand:bennugd.runCurrentFileV1",
+    "onCommand:bennugd.compileAndRunCurrentFileV1",
+    "onCommand:bennugd.compileCurrentFileV2",
+    "onCommand:bennugd.runCurrentFileV2",
+    "onCommand:bennugd.compileAndRunCurrentFileV2",
+    "onCommand:bennugd.configurePaths",
+    "onCommand:bennugd.configurePathsV1",
+    "onCommand:bennugd.configurePathsV2",
+    "onCommand:bennugd.openSettings",
+    "onCommand:bennugd.openSettingsV1",
+    "onCommand:bennugd.openSettingsV2",
+    "onCommand:bennugd1.compile",
+    "onCommand:bennugd1.run",
+    "onCommand:bennugd1.compileAndRun",
+    "onCommand:bennugd2.compile",
+    "onCommand:bennugd2.run",
+    "onCommand:bennugd2.compileAndRun"
+  ],
+  "main": "./client/out/extension",
+  "contributes": {
+    "languages": [
+      {
+        "id": "bennugd",
+        "aliases": [
+          "BennuGD",
+          "BennuGD v1"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "bennugd2",
+        "aliases": [
+          "BennuGD2",
+          "BennuGD v2"
+        ],
+        "extensions": [
+          ".prg"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "bennugd",
+        "scopeName": "source.bennugd",
+        "path": "./syntaxes/bennugd.tmLanguage.json"
+      },
+      {
+        "language": "bennugd2",
+        "scopeName": "source.bennugd2",
+        "path": "./syntaxes/bennugd2.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "bennugd.compileCurrentFile",
+        "title": "BennuGD: Compile Current File"
+      },
+      {
+        "command": "bennugd.runCurrentFile",
+        "title": "BennuGD: Compile and Run Current File"
+      },
+      {
+        "command": "bennugd.compileCurrentFileV1",
+        "title": "BennuGD v1: Compile Current File"
+      },
+      {
+        "command": "bennugd.runCurrentFileV1",
+        "title": "BennuGD v1: Compile and Run Current File"
+      },
+      {
+        "command": "bennugd.compileCurrentFileV2",
+        "title": "BennuGD v2: Compile Current File"
+      },
+      {
+        "command": "bennugd.runCurrentFileV2",
+        "title": "BennuGD v2: Compile and Run Current File"
+      },
+      {
+        "command": "bennugd.configurePaths",
+        "title": "BennuGD: Configure Paths..."
+      },
+      {
+        "command": "bennugd.configurePathsV1",
+        "title": "BennuGD v1: Configure Paths..."
+      },
+      {
+        "command": "bennugd.configurePathsV2",
+        "title": "BennuGD v2: Configure Paths..."
+      },
+      {
+        "command": "bennugd.openSettings",
+        "title": "BennuGD: Open Settings"
+      },
+      {
+        "command": "bennugd.openSettingsV1",
+        "title": "BennuGD v1: Open Settings"
+      },
+      {
+        "command": "bennugd.openSettingsV2",
+        "title": "BennuGD v2: Open Settings"
+      },
+      {
+        "command": "bennugd1.compile",
+        "title": "BennuGD v1 (Legacy): Compile Current File"
+      },
+      {
+        "command": "bennugd1.run",
+        "title": "BennuGD v1 (Legacy): Compile and Run Current File"
+      },
+      {
+        "command": "bennugd1.compileAndRun",
+        "title": "BennuGD v1 (Legacy): Compile and Run Current File"
+      },
+      {
+        "command": "bennugd2.compile",
+        "title": "BennuGD v2 (Legacy): Compile Current File"
+      },
+      {
+        "command": "bennugd2.run",
+        "title": "BennuGD v2 (Legacy): Compile and Run Current File"
+      },
+      {
+        "command": "bennugd2.compileAndRun",
+        "title": "BennuGD v2 (Legacy): Compile and Run Current File"
+      }
+    ],
+    "configuration": {
+      "title": "BennuGD",
+      "type": "object",
+      "properties": {
+        "bennugd.defaultVersion": {
+          "type": "string",
+          "enum": [
+            "v1",
+            "v2"
+          ],
+          "default": "v2",
+          "description": "Version used by the generic compile and run commands."
+        },
+        "bennugd.lsp.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Compiler binary used by the LSP server for diagnostics. Leave empty to disable save-time diagnostics."
+        },
+        "bennugd.lsp.sourceRoots": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra Bennu source roots scanned by the LSP server."
+        },
+        "bennugd.v1.sourceRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Root folder for BennuGD v1 sources."
+        },
+        "bennugd.v1.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the BennuGD v1 compiler binary."
+        },
+        "bennugd.v1.runtimePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the BennuGD v1 runtime binary."
+        },
+        "bennugd.v1.compilerArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra command-line arguments for the BennuGD v1 compiler."
+        },
+        "bennugd.v1.runtimeArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra command-line arguments for the BennuGD v1 runtime."
+        },
+        "bennugd.v2.sourceRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Root folder for BennuGD v2 sources."
+        },
+        "bennugd.v2.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the BennuGD v2 compiler binary."
+        },
+        "bennugd.v2.runtimePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the BennuGD v2 runtime binary."
+        },
+        "bennugd.v2.compilerArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra command-line arguments for the BennuGD v2 compiler."
+        },
+        "bennugd.v2.runtimeArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra command-line arguments for the BennuGD v2 runtime."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "bennugd.compileCurrentFile",
+        "key": "ctrl+alt+b",
+        "mac": "cmd+alt+b",
+        "when": "editorTextFocus && (editorLangId == bennugd || editorLangId == bennugd2)"
+      },
+      {
+        "command": "bennugd.runCurrentFile",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "editorTextFocus && (editorLangId == bennugd || editorLangId == bennugd2)"
+      }
+    ]
+  },
+  "scripts": {
+    "compile:client": "tsc -p ./tsconfig.json",
+    "compile:server": "tsc -p ./server/tsconfig.json",
+    "compile": "npm run compile:client && npm run compile:server",
+    "watch:client": "tsc -w -p ./tsconfig.json",
+    "watch:server": "tsc -w -p ./server/tsconfig.json",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  },
+  "author": "LazySoftware.es",
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.101.0",
+    "typescript": "^5.6.3"
+  },
+  "license": "MIT"
+}
