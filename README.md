@@ -59,7 +59,7 @@ npx @vscode/vsce package
    - Click the `...` menu (top-right in Extensions view).
    - Click `Install from VSIX...`.
    - Select the generated file inside the cloned folder:
-     - `bennugd-vscode-support-1.0.7.vsix`
+     - `bennugd-vscode-support-1.0.32.vsix`
 
 4. Configure Bennu paths:
    - Open `Settings`.

@@ -76,6 +76,7 @@ let sourceRootsByVersion: Record<BennuVersion, string[]> = { v1: [], v2: [] };
 let compilerPathByVersion: Record<BennuVersion, string> = { v1: '', v2: '' };
 let symbolIndexByVersion: Record<BennuVersion, Map<string, SymbolEntry>> = { v1: new Map(), v2: new Map() };
 let userFunctionIndexByVersion: Record<BennuVersion, Map<string, UserFunctionEntry>> = { v1: new Map(), v2: new Map() };
+let projectGlobalVariableIndexByVersion: Record<BennuVersion, Map<string, string>> = { v1: new Map(), v2: new Map() };
 const openDocuments = new Map<string, string>();
 const documentVersions = new Map<string, BennuVersion>();
 
@@ -108,6 +109,7 @@ const PARAM_MAP: Record<string, string[]> = {
 
 const NUMERIC_TYPES = new Set(['int', 'double', 'float', 'qword', 'dword', 'word', 'short', 'byte']);
 const KNOWN_PARAM_TYPES = new Set(['int', 'double', 'float', 'qword', 'dword', 'word', 'short', 'byte', 'string', 'pointer', 'variant']);
+const BUILTIN_NUMERIC_INTRINSICS = new Set(['SIZEOF']);
 
 const BENNUGD_KEYWORDS = [
   'begin',
@@ -481,6 +483,86 @@ function scanUserMacros(root: string, bucket: Map<string, UserFunctionEntry>) {
   }
 }
 
+function collectTopLevelTypedDeclarations(text: string): Map<string, string> {
+  const declarations = new Map<string, string>();
+  const code = stripCommentsPreservingLength(text);
+  const lines = code.split(/\r?\n/);
+  const declarationPattern =
+    /^\s*(?:(?:global|public|private|local)\s+)?(int|double|float|qword|dword|word|short|byte|string|pointer|variant)\b(.*)$/i;
+  let inTypeBlock = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+
+    if (/^(?:private|public|global|local)?\s*(?:process|function|procedure)\b/i.test(line)) {
+      break;
+    }
+
+    if (/^type\b/i.test(line)) {
+      inTypeBlock = true;
+      continue;
+    }
+    if (inTypeBlock) {
+      if (/^end\b/i.test(line)) {
+        inTypeBlock = false;
+      }
+      continue;
+    }
+
+    const match = rawLine.match(declarationPattern);
+    if (!match) {
+      continue;
+    }
+    const declaredType = match[1].toLowerCase();
+    const rest = match[2].replace(/;.*$/, '').trim();
+    if (!rest || rest.includes('(')) {
+      continue;
+    }
+    const declarators = splitArguments(rest);
+    for (const declarator of declarators) {
+      const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
+      if (!identifierMatch) {
+        continue;
+      }
+      declarations.set(identifierMatch[0].toUpperCase(), declaredType);
+    }
+  }
+
+  return declarations;
+}
+
+function mergeProjectVariableType(existing: string | undefined, incoming: string): string {
+  if (!existing) {
+    return incoming;
+  }
+  if (existing === incoming) {
+    return existing;
+  }
+  if (NUMERIC_TYPES.has(existing) && NUMERIC_TYPES.has(incoming)) {
+    return 'int';
+  }
+  return 'variant';
+}
+
+function scanProjectGlobalVariables(root: string, bucket: Map<string, string>) {
+  for (const filePath of walk(root, (fullPath) => fullPath.endsWith('.prg') || fullPath.endsWith('.inc'))) {
+    let text = '';
+    try {
+      text = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+    const topLevelDeclarations = collectTopLevelTypedDeclarations(text);
+    for (const [name, declaredType] of topLevelDeclarations.entries()) {
+      const existing = bucket.get(name);
+      bucket.set(name, mergeProjectVariableType(existing, declaredType));
+    }
+  }
+}
+
 function rebuildIndex() {
   const next: Record<BennuVersion, Map<string, SymbolEntry>> = {
     v1: new Map<string, SymbolEntry>(),
@@ -489,6 +571,10 @@ function rebuildIndex() {
   const nextUser: Record<BennuVersion, Map<string, UserFunctionEntry>> = {
     v1: new Map<string, UserFunctionEntry>(),
     v2: new Map<string, UserFunctionEntry>(),
+  };
+  const nextProjectGlobals: Record<BennuVersion, Map<string, string>> = {
+    v1: new Map<string, string>(),
+    v2: new Map<string, string>(),
   };
   const rootsByVersion: Record<BennuVersion, string[]> = {
     v1: [...sharedSourceRoots, ...sourceRootsByVersion.v1],
@@ -501,11 +587,13 @@ function rebuildIndex() {
       scanRoot(root, next[version]);
       scanUserFunctions(root, nextUser[version]);
       scanUserMacros(root, nextUser[version]);
+      scanProjectGlobalVariables(root, nextProjectGlobals[version]);
     }
   }
 
   symbolIndexByVersion = next;
   userFunctionIndexByVersion = nextUser;
+  projectGlobalVariableIndexByVersion = nextProjectGlobals;
 }
 
 function wordAt(text: string, offset: number): string {
@@ -550,6 +638,173 @@ function currentLinePrefix(text: string, offset: number): string {
 interface CallContext {
   name: string;
   argumentIndex: number;
+}
+
+interface MemberAccessContext {
+  baseIdentifier: string;
+  memberPrefix: string;
+}
+
+interface DocumentTypeField {
+  name: string;
+  type: string;
+}
+
+interface DocumentTypeDefinition {
+  name: string;
+  fields: DocumentTypeField[];
+}
+
+interface DocumentTypeContext {
+  types: Map<string, DocumentTypeDefinition>;
+  variables: Map<string, string>;
+}
+
+const BUILTIN_PROCESS_FIELDS: DocumentTypeField[] = [
+  { name: 'file', type: 'int' },
+  { name: 'graph', type: 'int' },
+  { name: 'x', type: 'double' },
+  { name: 'y', type: 'double' },
+  { name: 'z', type: 'int' },
+  { name: 'size', type: 'double' },
+  { name: 'real_size', type: 'double' },
+  { name: 'angle', type: 'int' },
+  { name: 'flags', type: 'int' },
+  { name: 'priority', type: 'int' },
+  { name: 'alpha', type: 'int' },
+  { name: 'region', type: 'int' },
+  { name: 'resolution', type: 'int' },
+  { name: 'ctype', type: 'int' },
+  { name: 'status', type: 'int' },
+  { name: 'signal', type: 'int' },
+  { name: 'id', type: 'int' },
+  { name: 'father', type: 'process' },
+  { name: 'son', type: 'process' },
+];
+
+const BUILTIN_PROCESS_SYMBOLS = new Set(['FATHER', 'SON', 'MYSELF', 'BACKGROUND']);
+const BUILTIN_IMPLICIT_IDENTIFIER_TYPES = new Map<string, string>([
+  ...BUILTIN_PROCESS_FIELDS.map((field): [string, string] => [field.name.toUpperCase(), field.type]),
+  ['MYSELF', 'process'],
+  ['BACKGROUND', 'process'],
+]);
+
+function memberAccessContextAt(text: string, offset: number): MemberAccessContext | undefined {
+  let i = offset - 1;
+  while (i >= 0 && /[A-Za-z0-9_#]/.test(text[i])) {
+    i -= 1;
+  }
+  const memberPrefix = text.slice(i + 1, offset);
+  if (i < 0 || text[i] !== '.') {
+    return undefined;
+  }
+
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(text[j])) {
+    j -= 1;
+  }
+  const baseEnd = j + 1;
+  while (j >= 0 && /[A-Za-z0-9_#]/.test(text[j])) {
+    j -= 1;
+  }
+  const baseIdentifier = text.slice(j + 1, baseEnd);
+  if (!/^[A-Za-z_#][A-Za-z0-9_#]*$/.test(baseIdentifier)) {
+    return undefined;
+  }
+
+  return { baseIdentifier, memberPrefix };
+}
+
+function parseDeclarationIdentifiers(declarationText: string): string[] {
+  const cleaned = declarationText.replace(/;.*$/, '').trim();
+  if (!cleaned) {
+    return [];
+  }
+  return splitArguments(cleaned)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => {
+      const match = item.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
+      return match?.[0] ?? '';
+    })
+    .filter((identifier) => identifier.length > 0);
+}
+
+function collectDocumentTypeContext(text: string): DocumentTypeContext {
+  const types = new Map<string, DocumentTypeDefinition>();
+  const variables = new Map<string, string>();
+  const lines = text.split(/\r?\n/);
+  let currentType: DocumentTypeDefinition | undefined;
+
+  for (const rawLine of lines) {
+    const line = stripDeclarationComments(rawLine);
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (currentType) {
+      if (/^end\b/i.test(trimmed)) {
+        types.set(currentType.name.toUpperCase(), currentType);
+        currentType = undefined;
+        continue;
+      }
+
+      const fieldMatch = line.match(/^\s*([A-Za-z_#][A-Za-z0-9_#]*)\s+(.+)$/);
+      if (!fieldMatch) {
+        continue;
+      }
+      const fieldType = fieldMatch[1];
+      for (const fieldName of parseDeclarationIdentifiers(fieldMatch[2])) {
+        currentType.fields.push({ name: fieldName, type: fieldType.toLowerCase() });
+      }
+      continue;
+    }
+
+    const typeMatch = line.match(/^\s*type\s+([A-Za-z_#][A-Za-z0-9_#]*)\b/i);
+    if (typeMatch) {
+      currentType = { name: typeMatch[1], fields: [] };
+      continue;
+    }
+
+    const variableMatch = line.match(/^\s*(?:(?:local|global|private|public)\s+)?([A-Za-z_#][A-Za-z0-9_#]*)\s+(.+)$/i);
+    if (!variableMatch) {
+      continue;
+    }
+    const typeName = variableMatch[1];
+    if (
+      /^(process|function|procedure|type|if|for|while|loop|switch|case|default|return|break|include|import|program|begin|end)$/i.test(
+        typeName,
+      )
+    ) {
+      continue;
+    }
+    const declarationTail = variableMatch[2];
+    if (/\(/.test(declarationTail)) {
+      continue;
+    }
+    for (const variableName of parseDeclarationIdentifiers(declarationTail)) {
+      variables.set(variableName.toUpperCase(), typeName.toUpperCase());
+    }
+  }
+
+  if (currentType) {
+    types.set(currentType.name.toUpperCase(), currentType);
+  }
+
+  if (!types.has('PROCESS')) {
+    types.set('PROCESS', {
+      name: 'process',
+      fields: [...BUILTIN_PROCESS_FIELDS],
+    });
+  }
+  for (const symbol of BUILTIN_PROCESS_SYMBOLS) {
+    if (!variables.has(symbol)) {
+      variables.set(symbol, 'PROCESS');
+    }
+  }
+
+  return { types, variables };
 }
 
 function callContextAt(text: string, offset: number): CallContext | undefined {
@@ -814,12 +1069,10 @@ function inferLiteralType(argument: string): 'string' | 'number' | 'unknown' {
   if (!value) {
     return 'unknown';
   }
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith('\'') && value.endsWith('\'')) ||
-    /"(?:[^"\\]|\\.)*"/.test(value) ||
-    /'(?:[^'\\]|\\.)*'/.test(value)
-  ) {
+  if (/^(true|false)$/i.test(value)) {
+    return 'number';
+  }
+  if (/^"(?:[^"\\]|\\.)*"$/.test(value) || /^'(?:[^'\\]|\\.)*'$/.test(value)) {
     return 'string';
   }
   if (/^[-+]?((\d+(\.\d+)?)|(\.\d+))$/.test(value) || /^0x[0-9a-f]+$/i.test(value) || /^[0-9+\-*/%().\s]+$/.test(value)) {
@@ -836,15 +1089,27 @@ function coreSignatureParamTypes(signature: string): (string | undefined)[] {
     .map((entry) => entry ?? undefined);
 }
 
-function isTypeCompatible(expected: string | undefined, actual: 'string' | 'number' | 'unknown'): boolean {
-  if (!expected || actual === 'unknown' || expected === 'variant') {
+function isTypeCompatible(expected: string | undefined, actual: ResolvedArgType): boolean {
+  if (!expected || expected === 'variant') {
+    return true;
+  }
+  if (actual.kind === 'variant') {
+    return true;
+  }
+  if (actual.unresolvedIdentifier) {
+    return false;
+  }
+  if (actual.kind === 'unknown') {
     return true;
   }
   if (expected === 'string') {
-    return actual === 'string';
+    return actual.kind === 'string';
+  }
+  if (expected === 'pointer') {
+    return actual.kind === 'pointer' || actual.kind === 'number';
   }
   if (NUMERIC_TYPES.has(expected)) {
-    return actual === 'number';
+    return actual.kind === 'number';
   }
   return true;
 }
@@ -1091,13 +1356,883 @@ function codeForTokenDiagnostics(line: string): string {
 interface CallMatch {
   name: string;
   args: string;
+  argsStart: number;
+  argsEnd: number;
   start: number;
   end: number;
 }
 
-function extractCallMatches(line: string): CallMatch[] {
-  const matches: CallMatch[] = [];
+interface ResolvedArgType {
+  kind: 'string' | 'number' | 'pointer' | 'variant' | 'unknown';
+  unresolvedIdentifier?: string;
+}
+
+function buildLineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '\n') {
+      starts.push(i + 1);
+    }
+  }
+  return starts;
+}
+
+function positionAtOffset(lineStarts: number[], offset: number): { line: number; character: number } {
+  let low = 0;
+  let high = lineStarts.length - 1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const start = lineStarts[mid];
+    const next = mid + 1 < lineStarts.length ? lineStarts[mid + 1] : Number.MAX_SAFE_INTEGER;
+    if (offset < start) {
+      high = mid - 1;
+      continue;
+    }
+    if (offset >= next) {
+      low = mid + 1;
+      continue;
+    }
+    return { line: mid, character: Math.max(offset - start, 0) };
+  }
+  const lastLine = Math.max(lineStarts.length - 1, 0);
+  return { line: lastLine, character: 0 };
+}
+
+function rangeFromOffsets(lineStarts: number[], startOffset: number, endOffset: number) {
+  return {
+    start: positionAtOffset(lineStarts, Math.max(startOffset, 0)),
+    end: positionAtOffset(lineStarts, Math.max(endOffset, startOffset + 1)),
+  };
+}
+
+function stripCommentsPreservingLength(text: string): string {
+  let output = '';
+  let inString = false;
+  let quote = '';
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    const next = text[i + 1] ?? '';
+    const prev = i > 0 ? text[i - 1] : '';
+
+    if (inLineComment) {
+      if (ch === '\n') {
+        inLineComment = false;
+        output += '\n';
+      } else {
+        output += ' ';
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === '\n') {
+        output += '\n';
+        continue;
+      }
+      if (ch === '*' && next === '/') {
+        output += '  ';
+        i += 1;
+        inBlockComment = false;
+        continue;
+      }
+      output += ' ';
+      continue;
+    }
+
+    if (inString) {
+      output += ch;
+      if (ch === quote && prev !== '\\') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === '\'') {
+      inString = true;
+      quote = ch;
+      output += ch;
+      continue;
+    }
+
+    if (ch === '/' && next === '/') {
+      output += '  ';
+      i += 1;
+      inLineComment = true;
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      output += '  ';
+      i += 1;
+      inBlockComment = true;
+      continue;
+    }
+
+    output += ch;
+  }
+
+  return output;
+}
+
+function normalizeDeclaredType(typeName?: string): 'string' | 'number' | 'pointer' | 'variant' | 'unknown' {
+  const type = (typeName ?? '').trim().toLowerCase();
+  if (!type) {
+    return 'unknown';
+  }
+  if (type === 'string') {
+    return 'string';
+  }
+  if (type === 'pointer') {
+    return 'pointer';
+  }
+  if (type === 'variant') {
+    return 'variant';
+  }
+  if (NUMERIC_TYPES.has(type)) {
+    return 'number';
+  }
+  return 'unknown';
+}
+
+function resolveMemberAccessType(
+  memberAccess: string,
+  variableTypes: Map<string, string>,
+  typeContext: DocumentTypeContext,
+): ResolvedArgType {
+  const segments = memberAccess.split('.').map((segment) => segment.trim()).filter((segment) => segment.length > 0);
+  if (segments.length < 2) {
+    return { kind: 'unknown' };
+  }
+
+  const baseKey = segments[0].toUpperCase();
+  let currentType = typeContext.variables.get(baseKey) ?? variableTypes.get(baseKey);
+  if (!currentType) {
+    // Base symbol may come from includes/other modules not indexed in-document.
+    // Keep it unknown (non-blocking) instead of reporting a hard unresolved identifier.
+    return { kind: 'unknown' };
+  }
+
+  for (let i = 1; i < segments.length; i += 1) {
+    const typeName = currentType.toUpperCase();
+    const typeDefinition = typeContext.types.get(typeName);
+    if (!typeDefinition) {
+      return { kind: normalizeDeclaredType(currentType) };
+    }
+
+    const fieldName = segments[i];
+    const field = typeDefinition.fields.find((entry) => entry.name.toUpperCase() === fieldName.toUpperCase());
+    if (!field) {
+      return { kind: 'unknown', unresolvedIdentifier: segments.slice(0, i + 1).join('.') };
+    }
+    currentType = field.type;
+  }
+
+  return { kind: normalizeDeclaredType(currentType) };
+}
+
+function resolveIdentifierType(
+  identifier: string,
+  variableTypes: Map<string, string>,
+  version: BennuVersion,
+  typeContext?: DocumentTypeContext,
+): ResolvedArgType {
+  const key = identifier.toUpperCase();
+  if (BUILTIN_NUMERIC_INTRINSICS.has(key)) {
+    return { kind: 'number' };
+  }
+  const declaredType = variableTypes.get(key);
+  if (declaredType) {
+    return { kind: normalizeDeclaredType(declaredType) };
+  }
+  if (typeContext?.variables.has(key)) {
+    const declaredStructType = typeContext.variables.get(key);
+    return { kind: normalizeDeclaredType(declaredStructType) };
+  }
+  if (BUILTIN_IMPLICIT_IDENTIFIER_TYPES.has(key)) {
+    const builtinType = BUILTIN_IMPLICIT_IDENTIFIER_TYPES.get(key);
+    return { kind: normalizeDeclaredType(builtinType) };
+  }
+  const projectGlobalType = projectGlobalVariableIndexByVersion[version].get(key);
+  if (projectGlobalType) {
+    return { kind: normalizeDeclaredType(projectGlobalType) };
+  }
+
+  const coreEntry = getIndex(version).get(key);
+  if (coreEntry?.kind === 'function') {
+    return { kind: normalizeDeclaredType(coreEntry.returnType) };
+  }
+  if (coreEntry?.kind === 'constant') {
+    return { kind: normalizeDeclaredType(coreEntry.returnType) };
+  }
+  if (userFunctionIndexByVersion[version].has(key)) {
+    // Known user function/process symbol; avoid unresolved-identifier noise when seen in expressions.
+    return { kind: 'unknown' };
+  }
+
+  // External/global constants often come from includes or sibling files and are commonly UPPER_CASE.
+  // Treat them as non-blocking numeric-like values to avoid false type mismatches across files.
+  if (/^[A-Z_][A-Z0-9_]*$/.test(identifier)) {
+    return { kind: 'unknown' };
+  }
+
+  return { kind: 'unknown', unresolvedIdentifier: identifier };
+}
+
+function resolveArgumentType(
+  argument: string,
+  variableTypes: Map<string, string>,
+  version: BennuVersion,
+  typeContext?: DocumentTypeContext,
+): ResolvedArgType {
+  const trimmed = argument.trim();
+  if (!trimmed) {
+    return { kind: 'unknown' };
+  }
+
+  // Bennu selector syntax used in APIs like collision(type mouse), signal(type Proc, ...), get_id(type Proc), etc.
+  if (/^type\s+[A-Za-z_#][A-Za-z0-9_#]*$/i.test(trimmed)) {
+    return { kind: 'number' };
+  }
+
+  const literal = inferLiteralType(trimmed);
+  if (literal === 'string' || literal === 'number') {
+    return { kind: literal };
+  }
+
+  const byReferenceMatch = trimmed.match(/^&\s*([A-Za-z_#][A-Za-z0-9_#]*)$/);
+  if (byReferenceMatch) {
+    return { kind: 'pointer' };
+  }
+
+  const memberAccessOnly = trimmed.match(/^[A-Za-z_#][A-Za-z0-9_#]*(?:\.[A-Za-z_#][A-Za-z0-9_#]*)+$/);
+  if (memberAccessOnly && typeContext) {
+    return resolveMemberAccessType(memberAccessOnly[0], variableTypes, typeContext);
+  }
+
+  const identifierOnly = trimmed.match(/^[A-Za-z_#][A-Za-z0-9_#]*$/);
+  if (identifierOnly) {
+    return resolveIdentifierType(identifierOnly[0], variableTypes, version, typeContext);
+  }
+
+  // Best-effort type inference for arithmetic expressions that include identifiers.
+  if (/^[A-Za-z0-9_#\s+\-*/%().[\]]+$/.test(trimmed)) {
+    let expressionForIdentifiers = trimmed;
+    const unresolvedMemberAccesses: string[] = [];
+    if (typeContext) {
+      expressionForIdentifiers = expressionForIdentifiers.replace(
+        /\b[A-Za-z_#][A-Za-z0-9_#]*(?:\.[A-Za-z_#][A-Za-z0-9_#]*)+\b/g,
+        (memberAccess) => {
+          const resolved = resolveMemberAccessType(memberAccess, variableTypes, typeContext);
+          if (resolved.unresolvedIdentifier) {
+            unresolvedMemberAccesses.push(resolved.unresolvedIdentifier);
+            return '0';
+          }
+          if (resolved.kind === 'string') {
+            return '"s"';
+          }
+          return '0';
+        },
+      );
+    }
+
+    // Normalize Bennu process-type selector fragments (type ProcName) to numeric placeholders.
+    expressionForIdentifiers = expressionForIdentifiers.replace(/\btype\s+[A-Za-z_#][A-Za-z0-9_#]*\b/gi, '0');
+
+    if (unresolvedMemberAccesses.length > 0) {
+      return { kind: 'unknown', unresolvedIdentifier: unresolvedMemberAccesses[0] };
+    }
+
+    const identifiers = [...expressionForIdentifiers.matchAll(/\b([A-Za-z_#][A-Za-z0-9_#]*)\b/g)].map((match) => match[1]);
+    if (identifiers.length === 0) {
+      return { kind: inferLiteralType(trimmed) };
+    }
+    const unresolved = identifiers
+      .map((identifier) => resolveIdentifierType(identifier, variableTypes, version, typeContext))
+      .find((entry) => entry.unresolvedIdentifier);
+    if (unresolved) {
+      return unresolved;
+    }
+    const allNumeric = identifiers.every((identifier) => {
+      const resolved = resolveIdentifierType(identifier, variableTypes, version, typeContext);
+      return resolved.kind === 'number';
+    });
+    if (allNumeric) {
+      return { kind: 'number' };
+    }
+  }
+
+  return { kind: 'unknown' };
+}
+
+function isLineCommentedOnly(line: string): boolean {
+  return line.trim().startsWith('//');
+}
+
+function collectDeclaredVariableTypes(text: string): Map<string, string> {
+  const declarations = new Map<string, string>();
+  const code = stripCommentsPreservingLength(text);
+  const lines = code.split(/\r?\n/);
+  const declarationPattern =
+    /^\s*(?:(?:local|global|private|public)\s+)?(int|double|float|qword|dword|word|short|byte|string|pointer|variant)\b(.*)$/i;
+  const functionHeaderPattern =
+    /(?:^|\n)\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+[A-Za-z_#][A-Za-z0-9_#]*\s*\(([\s\S]*?)\)/gi;
+
+  for (const match of code.matchAll(functionHeaderPattern)) {
+    const paramsText = match[1] ?? '';
+    const parsed = parseUserParams(paramsText);
+    for (let i = 0; i < parsed.names.length; i += 1) {
+      const name = parsed.names[i]?.trim();
+      const type = parsed.types[i]?.trim().toLowerCase();
+      if (!name || !type || !/^[A-Za-z_#][A-Za-z0-9_#]*$/.test(name)) {
+        continue;
+      }
+      declarations.set(name.toUpperCase(), type);
+    }
+  }
+
+  for (const line of lines) {
+    if (!line.trim() || isLineCommentedOnly(line)) {
+      continue;
+    }
+    const match = line.match(declarationPattern);
+    if (!match) {
+      continue;
+    }
+    const declaredType = match[1].toLowerCase();
+    const rest = match[2].replace(/;.*$/, '').trim();
+    if (!rest || rest.includes('(')) {
+      continue;
+    }
+    const declarators = splitArguments(rest);
+    for (const declarator of declarators) {
+      const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
+      if (!identifierMatch) {
+        continue;
+      }
+      const identifier = identifierMatch[0];
+      declarations.set(identifier.toUpperCase(), declaredType);
+    }
+  }
+
+  return declarations;
+}
+
+interface RoutineScopeContext {
+  startOffset: number;
+  endOffset: number;
+  variableTypes: Map<string, string>;
+}
+
+function collectTypedDeclarationsFromCodeSegment(codeSegment: string): Map<string, string> {
+  const declarations = new Map<string, string>();
+  const lines = codeSegment.split(/\r?\n/);
+  const declarationPattern =
+    /^\s*(?:(?:local|global|private|public)\s+)?(int|double|float|qword|dword|word|short|byte|string|pointer|variant)\b(.*)$/i;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const match = line.match(declarationPattern);
+    if (!match) {
+      continue;
+    }
+    const declaredType = match[1].toLowerCase();
+    const rest = match[2].replace(/;.*$/, '').trim();
+    if (!rest || rest.includes('(')) {
+      continue;
+    }
+    const declarators = splitArguments(rest);
+    for (const declarator of declarators) {
+      const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
+      if (!identifierMatch) {
+        continue;
+      }
+      declarations.set(identifierMatch[0].toUpperCase(), declaredType);
+    }
+  }
+
+  return declarations;
+}
+
+function collectRoutineScopeContexts(text: string): RoutineScopeContext[] {
+  const contexts: RoutineScopeContext[] = [];
+  const code = stripCommentsPreservingLength(text);
+  const headerPattern =
+    /(?:^|\n)\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+[A-Za-z_#][A-Za-z0-9_#]*\s*\(([\s\S]*?)\)/gi;
+  const headers: Array<{ startOffset: number; headerEndOffset: number; paramsText: string }> = [];
+
+  for (const match of code.matchAll(headerPattern)) {
+    const headerText = match[0] ?? '';
+    const startOffset = match.index ?? 0;
+    const headerEndOffset = startOffset + headerText.length;
+    headers.push({
+      startOffset,
+      headerEndOffset,
+      paramsText: match[1] ?? '',
+    });
+  }
+
+  for (let i = 0; i < headers.length; i += 1) {
+    const header = headers[i];
+    const endOffset = i + 1 < headers.length ? headers[i + 1].startOffset : code.length;
+    const variableTypes = new Map<string, string>();
+
+    const params = parseUserParams(header.paramsText);
+    for (let paramIndex = 0; paramIndex < params.names.length; paramIndex += 1) {
+      const name = params.names[paramIndex]?.trim();
+      const type = params.types[paramIndex]?.trim().toLowerCase();
+      if (!name || !type || !/^[A-Za-z_#][A-Za-z0-9_#]*$/.test(name)) {
+        continue;
+      }
+      variableTypes.set(name.toUpperCase(), type);
+    }
+
+    const localDeclarations = collectTypedDeclarationsFromCodeSegment(code.slice(header.headerEndOffset, endOffset));
+    for (const [name, declaredType] of localDeclarations.entries()) {
+      variableTypes.set(name, declaredType);
+    }
+
+    contexts.push({
+      startOffset: header.startOffset,
+      endOffset,
+      variableTypes,
+    });
+  }
+
+  return contexts;
+}
+
+function variableTypesForOffset(
+  globalVariableTypes: Map<string, string>,
+  routineScopes: RoutineScopeContext[],
+  offset: number,
+): Map<string, string> {
+  let scope: RoutineScopeContext | undefined;
+  for (const entry of routineScopes) {
+    if (offset < entry.startOffset) {
+      break;
+    }
+    if (offset >= entry.startOffset && offset < entry.endOffset) {
+      scope = entry;
+    }
+  }
+  if (!scope || scope.variableTypes.size === 0) {
+    return globalVariableTypes;
+  }
+  const merged = new Map(globalVariableTypes);
+  for (const [name, declaredType] of scope.variableTypes.entries()) {
+    merged.set(name, declaredType);
+  }
+  return merged;
+}
+
+function inferredTypeNameFromResolvedType(kind: ResolvedArgType['kind']): string | undefined {
+  if (kind === 'number') {
+    return 'int';
+  }
+  if (kind === 'string') {
+    return 'string';
+  }
+  if (kind === 'pointer') {
+    return 'pointer';
+  }
+  if (kind === 'variant') {
+    return 'variant';
+  }
+  return undefined;
+}
+
+function shouldUpdateInferredType(existingType: string | undefined, nextType: string): boolean {
+  if (!existingType) {
+    return true;
+  }
+  const existing = normalizeDeclaredType(existingType);
+  const incoming = normalizeDeclaredType(nextType);
+  if (existing === 'unknown') {
+    return true;
+  }
+  if (existing === incoming) {
+    return false;
+  }
+  if (existing === 'number' && incoming === 'number') {
+    return false;
+  }
+  return false;
+}
+
+function inferVariableTypesFromAssignments(
+  text: string,
+  seedTypes: Map<string, string>,
+  version: BennuVersion,
+  typeContext: DocumentTypeContext,
+): Map<string, string> {
+  const inferred = new Map(seedTypes);
+  const code = stripCommentsPreservingLength(text);
+  const lines = code.split(/\r?\n/);
+  const assignmentPattern = /(?:^|;)\s*([A-Za-z_#][A-Za-z0-9_#]*)\s*=\s*([^;]+)(?=;|$)/g;
+
+  // Iterate a few passes so `A = B; B = 123;` can eventually infer A as number too.
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || /^#/.test(line)) {
+        continue;
+      }
+
+      for (const match of rawLine.matchAll(assignmentPattern)) {
+        const lhs = match[1];
+        const rhs = match[2].trim();
+        if (!lhs || !rhs) {
+          continue;
+        }
+        if (rhs.includes('==') || rhs.includes('!=') || rhs.includes('<=') || rhs.includes('>=')) {
+          continue;
+        }
+
+        const resolved = resolveArgumentType(rhs, inferred, version, typeContext);
+        const inferredType = inferredTypeNameFromResolvedType(resolved.kind);
+        if (!inferredType) {
+          continue;
+        }
+
+        const key = lhs.toUpperCase();
+        const existing = inferred.get(key);
+        if (shouldUpdateInferredType(existing, inferredType)) {
+          inferred.set(key, inferredType);
+          changed = true;
+        }
+      }
+    }
+
+    if (!changed) {
+      break;
+    }
+  }
+
+  return inferred;
+}
+
+interface DocumentMacroSignature {
+  name: string;
+  parameterNames: string[];
+  parameterTypes: (string | undefined)[];
+}
+
+function canonicalExpectedType(typeName?: string): string | undefined {
+  const type = (typeName ?? '').trim().toLowerCase();
+  if (!type) {
+    return undefined;
+  }
+  if (type === 'string' || type === 'pointer' || type === 'variant') {
+    return type;
+  }
+  if (NUMERIC_TYPES.has(type)) {
+    return type;
+  }
+  return undefined;
+}
+
+function mergeExpectedTypes(existing: string | undefined, incoming: string | undefined): string | undefined {
+  if (!incoming) {
+    return existing;
+  }
+  if (!existing || existing === incoming) {
+    return incoming;
+  }
+  if (NUMERIC_TYPES.has(existing) && NUMERIC_TYPES.has(incoming)) {
+    return 'int';
+  }
+  return existing;
+}
+
+function knownIdentifierExpectedType(
+  identifier: string,
+  variableTypes: Map<string, string>,
+  index: Map<string, SymbolEntry>,
+): string | undefined {
+  const key = identifier.toUpperCase();
+  const declaredType = canonicalExpectedType(variableTypes.get(key));
+  if (declaredType) {
+    return declaredType;
+  }
+  const coreEntry = index.get(key);
+  if (coreEntry?.kind === 'constant') {
+    return canonicalExpectedType(coreEntry.returnType);
+  }
+  return undefined;
+}
+
+function inferMacroParameterTypes(
+  bodyText: string,
+  parameterNames: string[],
+  variableTypes: Map<string, string>,
+  index: Map<string, SymbolEntry>,
+): (string | undefined)[] {
+  const inferred = new Array<string | undefined>(parameterNames.length).fill(undefined);
+  if (!bodyText.trim() || parameterNames.length === 0) {
+    return inferred;
+  }
+
+  const paramIndexByName = new Map<string, number>();
+  for (let i = 0; i < parameterNames.length; i += 1) {
+    paramIndexByName.set(parameterNames[i].toUpperCase(), i);
+  }
+
+  const body = stripCommentsPreservingLength(bodyText);
+
+  const assignmentPattern = /\b([A-Za-z_#][A-Za-z0-9_#]*)\b\s*=\s*\b([A-Za-z_#][A-Za-z0-9_#]*)\b/g;
+  for (const match of body.matchAll(assignmentPattern)) {
+    const lhs = match[1];
+    const rhs = match[2];
+
+    const rhsParamIndex = paramIndexByName.get(rhs.toUpperCase());
+    if (rhsParamIndex !== undefined) {
+      const lhsType = knownIdentifierExpectedType(lhs, variableTypes, index);
+      inferred[rhsParamIndex] = mergeExpectedTypes(inferred[rhsParamIndex], lhsType);
+    }
+
+    const lhsParamIndex = paramIndexByName.get(lhs.toUpperCase());
+    if (lhsParamIndex !== undefined) {
+      const rhsType = knownIdentifierExpectedType(rhs, variableTypes, index);
+      inferred[lhsParamIndex] = mergeExpectedTypes(inferred[lhsParamIndex], rhsType);
+    }
+  }
+
+  for (const call of extractCallMatches(body)) {
+    const entry = index.get(call.name.toUpperCase());
+    if (!entry || entry.kind !== 'function') {
+      continue;
+    }
+    const args = splitArguments(call.args);
+    if (args.length === 0) {
+      continue;
+    }
+    const signatures = (entry.signatures.length > 0 ? entry.signatures : [entry.signature])
+      .map((sig) => coreSignatureParamTypes(sig))
+      .filter((sigTypes) => sigTypes.length === args.length);
+    if (signatures.length === 0) {
+      continue;
+    }
+
+    for (let argIndex = 0; argIndex < args.length; argIndex += 1) {
+      const paramIndex = paramIndexByName.get(args[argIndex].trim().toUpperCase());
+      if (paramIndex === undefined) {
+        continue;
+      }
+
+      const candidateTypes = new Set<string>();
+      for (const sig of signatures) {
+        const expected = canonicalExpectedType(sig[argIndex]);
+        if (expected) {
+          candidateTypes.add(expected);
+        }
+      }
+
+      if (candidateTypes.size === 1) {
+        inferred[paramIndex] = mergeExpectedTypes(inferred[paramIndex], [...candidateTypes][0]);
+        continue;
+      }
+      if (candidateTypes.size > 1) {
+        const allNumeric = [...candidateTypes].every((type) => NUMERIC_TYPES.has(type));
+        if (allNumeric) {
+          inferred[paramIndex] = mergeExpectedTypes(inferred[paramIndex], 'int');
+        }
+      }
+    }
+  }
+
+  return inferred;
+}
+
+function collectDocumentMacroSignatures(
+  text: string,
+  version: BennuVersion,
+  variableTypes: Map<string, string>,
+  index: Map<string, SymbolEntry>,
+): Map<string, DocumentMacroSignature> {
+  const macros = new Map<string, DocumentMacroSignature>();
+  const lines = text.split(/\r?\n/);
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const declarationLine = stripDeclarationComments(lines[i]);
+    const match = declarationLine.match(/^\s*#define\s+([A-Za-z_#][A-Za-z0-9_#]*)\s*\(([^)]*)\)(.*)$/i);
+    if (!match) {
+      continue;
+    }
+
+    const name = match[1];
+    const parameterNames = splitArguments(match[2]).map((item) => item.trim()).filter((item) => item.length > 0);
+    const bodySegments: string[] = [];
+
+    const pushSegment = (segment: string) => {
+      const withoutBackslash = segment.replace(/\\\s*$/, '').trim();
+      if (withoutBackslash.length > 0) {
+        bodySegments.push(withoutBackslash);
+      }
+    };
+
+    pushSegment((match[3] ?? '').trim());
+
+    while (lines[i].trimEnd().endsWith('\\') && i + 1 < lines.length) {
+      i += 1;
+      pushSegment(stripDeclarationComments(lines[i]));
+    }
+
+    const bodyText = bodySegments.join(' ');
+    macros.set(name.toUpperCase(), {
+      name,
+      parameterNames,
+      parameterTypes: inferMacroParameterTypes(bodyText, parameterNames, variableTypes, index),
+    });
+  }
+
+  return macros;
+}
+
+function unresolvedArgumentIdentifiers(actualTypes: ResolvedArgType[]): string[] {
+  return [...new Set(actualTypes.map((argType) => argType.unresolvedIdentifier).filter(Boolean) as string[])]
+    .filter((identifier) => /[a-z]/.test(identifier));
+}
+
+function lineHasUnclosedOpenParen(line: string): boolean {
   const code = codeWithoutComments(line);
+  let depth = 0;
+  let inString = false;
+  let quote = '';
+
+  for (let i = 0; i < code.length; i += 1) {
+    const ch = code[i];
+    const prev = i > 0 ? code[i - 1] : '';
+
+    if (inString) {
+      if (ch === quote && prev !== '\\') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === '\'') {
+      inString = true;
+      quote = ch;
+      continue;
+    }
+
+    if (ch === '(') {
+      depth += 1;
+      continue;
+    }
+    if (ch === ')') {
+      depth = Math.max(depth - 1, 0);
+    }
+  }
+
+  return depth > 0;
+}
+
+function parenDepthAtLineStart(lines: string[]): number[] {
+  const depths: number[] = new Array(lines.length).fill(0);
+  let depth = 0;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    depths[lineIndex] = depth;
+    const line = lines[lineIndex];
+    let inString = false;
+    let quote = '';
+
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      const prev = i > 0 ? line[i - 1] : '';
+
+      if (inString) {
+        if (ch === quote && prev !== '\\') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"' || ch === '\'') {
+        inString = true;
+        quote = ch;
+        continue;
+      }
+
+      if (ch === '(') {
+        depth += 1;
+      } else if (ch === ')') {
+        depth = Math.max(depth - 1, 0);
+      }
+    }
+  }
+
+  return depths;
+}
+
+function collectMacroDefinitionLines(lines: string[]): Set<number> {
+  const macroLines = new Set<number>();
+  let insideMacro = false;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    const trimmed = line.trim();
+    const startsMacro = /^\s*#define\b/i.test(line);
+
+    if (startsMacro) {
+      insideMacro = true;
+    }
+
+    if (insideMacro) {
+      macroLines.add(lineIndex);
+      const continues = trimmed.endsWith('\\');
+      if (!continues) {
+        insideMacro = false;
+      }
+    }
+  }
+
+  return macroLines;
+}
+
+function hasSemicolonAfterCallOnSameLine(text: string, callEndOffset: number): boolean {
+  let i = Math.max(callEndOffset, 0);
+  while (i < text.length && text[i] !== '\n') {
+    const ch = text[i];
+    const next = text[i + 1] ?? '';
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === ';') {
+      return true;
+    }
+    if (ch === '/' && (next === '/' || next === '*')) {
+      return false;
+    }
+    return false;
+  }
+  return false;
+}
+
+function isStandaloneMultilineCall(text: string, match: CallMatch, lineStarts: number[]): boolean {
+  const startPos = positionAtOffset(lineStarts, match.start);
+  const endPos = positionAtOffset(lineStarts, Math.max(match.end - 1, match.start));
+  if (endPos.line <= startPos.line) {
+    return false;
+  }
+  const lineStartOffset = text.lastIndexOf('\n', Math.max(match.start - 1, 0)) + 1;
+  const prefix = text.slice(lineStartOffset, match.start).trim();
+  return prefix.length === 0;
+}
+
+function extractCallMatches(text: string): CallMatch[] {
+  const matches: CallMatch[] = [];
+  const code = stripCommentsPreservingLength(text);
   let i = 0;
 
   while (i < code.length) {
@@ -1160,6 +2295,8 @@ function extractCallMatches(line: string): CallMatch[] {
       matches.push({
         name,
         args: code.slice(argsStart, argsEnd),
+        argsStart,
+        argsEnd,
         start,
         end: i,
       });
@@ -1169,14 +2306,39 @@ function extractCallMatches(line: string): CallMatch[] {
   return matches;
 }
 
+function shouldSkipCallValidation(text: string, callStartOffset: number): boolean {
+  const lineStart = text.lastIndexOf('\n', Math.max(callStartOffset - 1, 0)) + 1;
+  const prefix = text.slice(lineStart, callStartOffset);
+
+  if (/^\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+$/i.test(prefix)) {
+    return true;
+  }
+  if (/^\s*#define\s+$/i.test(prefix)) {
+    return true;
+  }
+  return false;
+}
+
 function collectLiveDiagnostics(text: string, version: BennuVersion): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const lines = text.split(/\r?\n/);
+  const textWithoutComments = stripCommentsPreservingLength(text);
+  const linesWithoutComments = textWithoutComments.split(/\r?\n/);
+  const macroDefinitionLines = collectMacroDefinitionLines(linesWithoutComments);
+  const parenDepthByLine = parenDepthAtLineStart(linesWithoutComments);
+  const lineStarts = buildLineStarts(text);
   const index = getIndex(version);
   const userFunctions = userFunctionIndexByVersion[version];
+  const typeContext = collectDocumentTypeContext(text);
+  const declaredVariableTypes = collectDeclaredVariableTypes(text);
+  const variableTypes = inferVariableTypesFromAssignments(text, declaredVariableTypes, version, typeContext);
+  const routineScopes = collectRoutineScopeContexts(text);
+  const macroSignatures = collectDocumentMacroSignatures(text, version, variableTypes, index);
 
   for (const [lineNumber, line] of lines.entries()) {
-    const codeForTokens = codeForTokenDiagnostics(line);
+    const lineWithoutComments = linesWithoutComments[lineNumber] ?? '';
+    const codeForTokens = codeForTokenDiagnostics(lineWithoutComments);
+    const isMacroDefinitionLine = macroDefinitionLines.has(lineNumber);
 
     const invalidTokenPattern = /\b\d+[A-Za-z_][A-Za-z0-9_]*\b/g;
     for (const match of codeForTokens.matchAll(invalidTokenPattern)) {
@@ -1190,79 +2352,171 @@ function collectLiveDiagnostics(text: string, version: BennuVersion): Diagnostic
       });
     }
 
-    for (const match of extractCallMatches(line)) {
-      const callName = match.name.toUpperCase();
-      const entry = index.get(callName);
-      const userEntry = userFunctions.get(callName);
-      const expectedArgs =
-        userEntry
-          ? userEntry.arities
-          : entry && entry.kind === 'function' && entry.signature
-            ? signatureArities(entry)
-            : [];
-      const displayName = userEntry?.name ?? entry?.name ?? match.name;
-      if (expectedArgs.length === 0) {
-        continue;
-      }
+    const trimmed = lineWithoutComments.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (isMacroDefinitionLine) {
+      continue;
+    }
 
-      const actualArgs = splitArguments(match.args);
-      if (!expectedArgs.includes(actualArgs.length)) {
-        const signatureHint = expectedSignaturesText(entry, userEntry);
-        const descriptionHint = userEntry?.description || entry?.description;
-        const detailLines = [
-          `${displayName} expects ${expectedArgs.join(' or ')} argument(s) but got ${actualArgs.length}.`,
-          signatureHint,
-          descriptionHint ? `Description: ${descriptionHint}` : undefined,
-        ].filter((line): line is string => Boolean(line));
-        diagnostics.push({
-          severity: DiagnosticSeverity.Warning,
-          range: toRange(lineNumber, match.start, match.end),
-          source: 'bennugd',
-          message: detailLines.join('\n'),
-        });
-        continue;
-      }
+    const lastSemicolon = lineWithoutComments.lastIndexOf(';');
+    const trailingStatement = (lastSemicolon >= 0 ? lineWithoutComments.slice(lastSemicolon + 1) : lineWithoutComments).trim();
+    if (!trailingStatement) {
+      continue;
+    }
+    const insideParenthesizedContinuation = (parenDepthByLine[lineNumber] ?? 0) > 0;
 
-      const candidateParamTypes: (string | undefined)[][] = [];
-      if (userEntry) {
-        for (const types of userEntry.parameterTypes) {
-          if (types.length === actualArgs.length) {
-            candidateParamTypes.push(types);
-          }
+    if (
+      trailingStatement.endsWith(';') ||
+      trailingStatement.endsWith(':') ||
+      trailingStatement.endsWith('\\') ||
+      trailingStatement.endsWith('(') ||
+      trailingStatement.endsWith(',')
+    ) {
+      continue;
+    }
+
+    if (
+      /^(#|program\b|import\b|include\b|global\b|local\b|public\b|private\b|type\b|process\b|function\b|procedure\b|begin\b|end\b|else\b|elseif\b|if\b|for\b|while\b|loop\b|repeat\b|until\b|switch\b|case\b|default\b|break\b|return\b)/i.test(
+        trimmed,
+      ) ||
+      /^(#|program\b|import\b|include\b|global\b|local\b|public\b|private\b|type\b|process\b|function\b|procedure\b|begin\b|end\b|else\b|elseif\b|if\b|for\b|while\b|loop\b|repeat\b|until\b|switch\b|case\b|default\b|break\b|return\b)/i.test(
+        trailingStatement,
+      )
+    ) {
+      continue;
+    }
+
+    const hasCallLikeStatement = /\b[A-Za-z_#][A-Za-z0-9_#]*\s*\(/.test(trailingStatement);
+    const hasAssignmentLikeStatement = /\b[A-Za-z_][A-Za-z0-9_#]*\s*(?:=(?!=)|[+\-*/%]=)/.test(trailingStatement);
+    const callContinuesInNextLine = hasCallLikeStatement && lineHasUnclosedOpenParen(lineWithoutComments);
+
+    if (!insideParenthesizedContinuation && !callContinuesInNextLine && (hasCallLikeStatement || hasAssignmentLikeStatement)) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: toRange(lineNumber, 0, Math.max(trimmed.length, 1)),
+        source: 'bennugd',
+        message: 'Possible missing semicolon `;` at end of statement.',
+      });
+    }
+  }
+
+  for (const match of extractCallMatches(text)) {
+    if (shouldSkipCallValidation(text, match.start)) {
+      continue;
+    }
+    const callStartLine = positionAtOffset(lineStarts, match.start).line;
+    if (macroDefinitionLines.has(callStartLine)) {
+      continue;
+    }
+
+    const callName = match.name.toUpperCase();
+    const entry = index.get(callName);
+    const userEntry = userFunctions.get(callName);
+    const localMacro = macroSignatures.get(callName);
+    const expectedArgsSet = new Set<number>();
+    if (userEntry) {
+      for (const arity of userEntry.arities) {
+        expectedArgsSet.add(arity);
+      }
+    } else if (entry && entry.kind === 'function' && entry.signature) {
+      for (const arity of signatureArities(entry)) {
+        expectedArgsSet.add(arity);
+      }
+    }
+    if (localMacro) {
+      expectedArgsSet.add(localMacro.parameterNames.length);
+    }
+    const expectedArgs = [...expectedArgsSet];
+    const displayName = localMacro?.name ?? userEntry?.name ?? entry?.name ?? match.name;
+    if (expectedArgs.length === 0) {
+      continue;
+    }
+
+    const actualArgs = splitArguments(match.args);
+    if (!expectedArgs.includes(actualArgs.length)) {
+      const signatureHint = expectedSignaturesText(entry, userEntry);
+      const descriptionHint = userEntry?.description || entry?.description;
+      const detailLines = [
+        `${displayName} expects ${expectedArgs.join(' or ')} argument(s) but got ${actualArgs.length}.`,
+        signatureHint,
+        descriptionHint ? `Description: ${descriptionHint}` : undefined,
+      ].filter((line): line is string => Boolean(line));
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: rangeFromOffsets(lineStarts, match.start, match.end),
+        source: 'bennugd',
+        message: detailLines.join('\n'),
+      });
+      continue;
+    }
+
+    const candidateParamTypes: (string | undefined)[][] = [];
+    if (localMacro && localMacro.parameterTypes.length === actualArgs.length) {
+      candidateParamTypes.push(localMacro.parameterTypes);
+    }
+    if (userEntry) {
+      for (const types of userEntry.parameterTypes) {
+        if (types.length === actualArgs.length) {
+          candidateParamTypes.push(types);
         }
-      } else if (entry && entry.kind === 'function') {
-        const signatures = entry.signatures.length > 0 ? entry.signatures : [entry.signature];
-        for (const sig of signatures) {
-          const types = coreSignatureParamTypes(sig);
-          if (types.length === actualArgs.length) {
-            candidateParamTypes.push(types);
-          }
+      }
+    } else if (entry && entry.kind === 'function') {
+      const signatures = entry.signatures.length > 0 ? entry.signatures : [entry.signature];
+      for (const sig of signatures) {
+        const types = coreSignatureParamTypes(sig);
+        if (types.length === actualArgs.length) {
+          candidateParamTypes.push(types);
         }
       }
+    }
 
-      if (candidateParamTypes.length === 0) {
-        continue;
-      }
+    if (candidateParamTypes.length === 0) {
+      continue;
+    }
 
-      const actualTypes = actualArgs.map(inferLiteralType);
-      const hasCompatibleSignature = candidateParamTypes.some((paramTypes) =>
-        paramTypes.every((expected, index) => isTypeCompatible(expected, actualTypes[index])));
+    const scopedVariableTypes = variableTypesForOffset(variableTypes, routineScopes, match.start);
+    const actualTypes = actualArgs.map((arg) => resolveArgumentType(arg, scopedVariableTypes, version, typeContext));
+    const unresolvedIdentifiers = unresolvedArgumentIdentifiers(actualTypes);
+    if (unresolvedIdentifiers.length > 0) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: rangeFromOffsets(lineStarts, match.start, match.end),
+        source: 'bennugd',
+        message: `Unknown identifier(s) in arguments: ${unresolvedIdentifiers.join(', ')}.`,
+      });
+    }
 
-      if (!hasCompatibleSignature) {
-        const signatureHint = expectedSignaturesText(entry, userEntry);
-        const descriptionHint = userEntry?.description || entry?.description;
-        const detailLines = [
-          `${displayName} argument types do not match expected signature.`,
-          signatureHint,
-          descriptionHint ? `Description: ${descriptionHint}` : undefined,
-        ].filter((line): line is string => Boolean(line));
-        diagnostics.push({
-          severity: DiagnosticSeverity.Warning,
-          range: toRange(lineNumber, match.start, match.end),
-          source: 'bennugd',
-          message: detailLines.join('\n'),
-        });
-      }
+    const hasCompatibleSignature = candidateParamTypes.some((paramTypes) =>
+      paramTypes.every((expected, argIndex) => isTypeCompatible(expected, actualTypes[argIndex])));
+
+    if (!hasCompatibleSignature) {
+      const signatureHint = expectedSignaturesText(entry, userEntry);
+      const descriptionHint = userEntry?.description || entry?.description;
+      const unresolvedHint = unresolvedIdentifiers.length > 0 ? `Unresolved identifiers: ${unresolvedIdentifiers.join(', ')}` : undefined;
+      const detailLines = [
+        `${displayName} argument types do not match expected signature.`,
+        signatureHint,
+        unresolvedHint,
+        descriptionHint ? `Description: ${descriptionHint}` : undefined,
+      ].filter((line): line is string => Boolean(line));
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: rangeFromOffsets(lineStarts, match.start, match.end),
+        source: 'bennugd',
+        message: detailLines.join('\n'),
+      });
+    }
+
+    if (isStandaloneMultilineCall(text, match, lineStarts) && !hasSemicolonAfterCallOnSameLine(text, match.end)) {
+      const warningRange = rangeFromOffsets(lineStarts, Math.max(match.end - 1, match.start), match.end);
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: warningRange,
+        source: 'bennugd',
+        message: 'Possible missing semicolon `;` at end of multiline call statement.',
+      });
     }
   }
 
@@ -1323,7 +2577,7 @@ connection.onInitialize((params: InitializeParams) => {
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
-      completionProvider: { triggerCharacters: ['_', '#'] },
+      completionProvider: { triggerCharacters: ['_', '#', '.'] },
       hoverProvider: true,
       signatureHelpProvider: { triggerCharacters: ['(', ','], retriggerCharacters: [','] },
       documentSymbolProvider: true,
@@ -1358,6 +2612,31 @@ documents.onDidClose((event) => {
 connection.onCompletion((params) => {
   const text = openDocuments.get(params.textDocument.uri) ?? '';
   const offset = positionToOffset(text, params.position.line, params.position.character);
+  const memberContext = memberAccessContextAt(text, offset);
+  if (memberContext) {
+    const typeContext = collectDocumentTypeContext(text);
+    const variableType = typeContext.variables.get(memberContext.baseIdentifier.toUpperCase());
+    const typeDefinition = variableType ? typeContext.types.get(variableType.toUpperCase()) : undefined;
+    if (!typeDefinition) {
+      return { isIncomplete: false, items: [] };
+    }
+
+    const memberPrefix = memberContext.memberPrefix.toUpperCase();
+    const fieldItems = typeDefinition.fields
+      .filter((field) => !memberPrefix || field.name.toUpperCase().startsWith(memberPrefix))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((field) => ({
+        label: field.name,
+        kind: CompletionItemKind.Field,
+        detail: `${typeDefinition.name}.${field.name}: ${field.type}`,
+        documentation: `Field \`${field.name}\` from type \`${typeDefinition.name}\` (\`${field.type}\`).`,
+        insertText: field.name,
+        sortText: `0_${field.name.toUpperCase()}`,
+      }));
+
+    return { isIncomplete: false, items: fieldItems };
+  }
+
   const prefix = wordAt(text, offset).toUpperCase();
   const version = getDocumentVersion(params.textDocument.uri);
   const index = getIndex(version);
