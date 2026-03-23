@@ -2,7 +2,7 @@
   "name": "bennugd-vscode-support",
   "displayName": "BennuGD2 for VSCode 2026",
   "description": "BennuGD2 for VSCode 2026: LSP, syntax highlighting, compile and run commands",
-  "version": "1.0.32",
+  "version": "1.0.43",
   "publisher": "lazysoftware",
   "icon": "assets/icon.png",
   "engines": {

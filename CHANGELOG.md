@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.0.43 - 2026-03-23
+
+- Fixed routine-scope parameter indexing for untyped params (e.g. `PROCESS tres(tipe)`), which are now treated as `variant` by default.
+- Fixed false unresolved-identifier diagnostics for calls that pass untyped routine parameters (e.g. `get_treasure_loc(tipe)`).
+- Applied the same default-`variant` behavior to declaration harvesting from routine headers for consistent inference.
+
+## 1.0.42 - 2026-03-23
+
+- Fixed member-access analysis to support indexed chains such as `the_map_grid[0].cord[a][b]` in argument expressions.
+- Added normalization of indexed member paths (`obj[idx].field[idx] -> obj.field`) before type/member resolution.
+- This removes false `Unknown identifier(s)` diagnostics in valid calls like `trail_blip(a,b,the_map_grid[0].cord[a][b]);`.
+
+## 1.0.41 - 2026-03-23
+
+- Fixed false type-mismatch diagnostics for APIs with optional string parameters when legacy Bennu code passes null-like zero literals (for example `exit(0,0)`).
+- Added explicit null-literal recognition (`0`, `0x0...`, `0h...`) in argument inference and allowed only those null-like values to satisfy expected `string` parameters.
+- Keeps strict string validation for non-null numeric values (for example `log(2)` still reports type mismatch).
+
+## 1.0.40 - 2026-03-23
+
+- Fixed expression token analysis to treat Bennu operator keywords (`mod`, `div`, `and`, `or`, `xor`, `not`) as operators instead of identifiers.
+- This removes false unresolved/type-mismatch diagnostics in valid expressions such as `1000 - menuscroll mod 1800` used in calls like `zlDraw(...)`.
+- Improved numeric-expression fallback when an expression only contains numeric literals/operators after normalization.
+
+## 1.0.39 - 2026-03-23
+
+- Fixed core export parsing for `FUNC(...)` entries whose implementation token is wrapped in macros (for example `DRWFN_COLOR(point)` in `libmod_gfx_exports.h`).
+- This restores missing function variants in the LSP symbol index (for example `DRAW_POINT(III)`), removing false “expects 2 argument(s) but got 3” diagnostics in valid color draw calls.
+- Added safer source-symbol extraction from macro/comment forms in export lines so descriptions and variants are indexed more reliably.
+
+## 1.0.38 - 2026-03-23
+
+- Added support for classic Bennu hex literals with trailing `h` (for example `0048h`, `00FCh`, `01FEh`, `03FFh`) in literal/type analysis and invalid-token filtering.
+- Improved function-header parsing for typed return signatures (for example `FUNCTION Int Name(...)`), ensuring parameter types are recognized correctly in diagnostics.
+- Fixed false unresolved/type-mismatch diagnostics in cases like `Map_Load(Gal_Ruta + Gal_Archivo)` where parameters from typed function headers were previously missed.
+
+## 1.0.37 - 2026-03-23
+
+- Added `.lib` support to project source scanning (definitions, user signatures, macros, and global typed-variable indexing), so imported library globals are recognized in diagnostics.
+- Fixed false unresolved/type-mismatch diagnostics for symbols declared in `.lib` files, such as `jkeys_state` from `jkeys.lib` used in `zomg.prg`.
+- Hardened typed-declaration extraction by using fresh regex instances per line scan to avoid missed declarations in long files.
+
+## 1.0.36 - 2026-03-23
+
+- Improved typed-declaration parsing to support multiple same-line declarations separated by semicolons (for example `int L_money; int l_vidas;`) across project/global and local/scope indexes.
+- Fixed false unresolved diagnostics caused by missing symbols from those split declarations (for example `l_vidas` in `write_var(...)`).
+- Relaxed process member-access validation for project-specific runtime fields on process instances (for example `father.altura`) to avoid false unresolved member errors in expressions.
+
+## 1.0.35 - 2026-03-23
+
+- Improved assignment-based type inference for variables initialized from single function calls with complex arguments (including string literals), such as `gscore = fpg_load("data1/gscore.gdg");`.
+- This prevents false unresolved/type-mismatch diagnostics in later calls where those inferred variables are used as typed arguments (for example `Objeto_extra(..., gscore, ...)`).
+
+## 1.0.34 - 2026-03-23
+
+- Fixed false “Invalid token ... identifiers cannot start with a digit” diagnostics on valid hexadecimal literals (for example `0xfce888ff`, `0x4040fcff`).
+- Numeric-token validation now excludes hex-number patterns while still flagging invalid identifiers like `16BITS`.
+
+## 1.0.33 - 2026-03-23
+
+- Fixed false diagnostics on `declare process/function/procedure` headers:
+  - no more invalid “missing semicolon” warnings on declaration lines
+  - declaration headers are excluded from call-argument validation
+- Improved user-parameter parsing to support grouped typed declarations like `double x,y` and `int file,graph,z`.
+
 ## 1.0.32 - 2026-03-23
 
 - Added project-level global variable indexing (top-level typed declarations in `.prg/.inc`) so symbols declared in other files are recognized in current-file diagnostics.

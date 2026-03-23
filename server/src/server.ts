@@ -110,6 +110,10 @@ const PARAM_MAP: Record<string, string[]> = {
 const NUMERIC_TYPES = new Set(['int', 'double', 'float', 'qword', 'dword', 'word', 'short', 'byte']);
 const KNOWN_PARAM_TYPES = new Set(['int', 'double', 'float', 'qword', 'dword', 'word', 'short', 'byte', 'string', 'pointer', 'variant']);
 const BUILTIN_NUMERIC_INTRINSICS = new Set(['SIZEOF']);
+const EXPRESSION_OPERATOR_KEYWORDS = new Set(['MOD', 'DIV', 'AND', 'OR', 'XOR', 'NOT']);
+const INDEXED_MEMBER_ACCESS_PATTERN = /\b[A-Za-z_#][A-Za-z0-9_#]*(?:\[[^\]\r\n]*\])*(?:\.[A-Za-z_#][A-Za-z0-9_#]*(?:\[[^\]\r\n]*\])*)+\b/g;
+const TYPED_DECLARATION_SEGMENT_PATTERN =
+  /(?:(?:local|global|private|public)\s+)?(int|double|float|qword|dword|word|short|byte|string|pointer|variant)\b([^;]*)/gi;
 
 const BENNUGD_KEYWORDS = [
   'begin',
@@ -180,6 +184,10 @@ function walk(dir: string, predicate: (fullPath: string) => boolean): string[] {
   return result;
 }
 
+function isProjectSourceFile(fullPath: string): boolean {
+  return fullPath.endsWith('.prg') || fullPath.endsWith('.inc') || fullPath.endsWith('.lib');
+}
+
 function lineNumberAt(text: string, index: number): number {
   return text.slice(0, Math.max(index, 0)).split(/\r?\n/).length - 1;
 }
@@ -221,11 +229,15 @@ function addSymbol(
   descriptions: Record<string, DefinitionEntry>,
   bucket: Map<string, SymbolEntry>,
 ) {
-  const func = line.match(/FUNC\(\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*TYPE_([A-Z_]+)\s*,\s*([A-Za-z0-9_]+)\s*\)/);
+  const func = line.match(/FUNC\(\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*TYPE_([A-Z_]+)\s*,\s*(.+?)\s*\)\s*,?/);
   if (func) {
-    const [, name, signature, rawType, source] = func;
+    const [, name, signature, rawType, rawSourceExpr] = func;
     const key = name.toUpperCase();
     const returnType = TYPE_MAP[`TYPE_${rawType}`] ?? rawType.toLowerCase();
+    const sourceExpr = rawSourceExpr.trim();
+    const sourceFromComment = line.match(/\/\/\s*([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
+    const sourceFromExpr = sourceExpr.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
+    const source = sourceFromComment ?? sourceFromExpr ?? sourceExpr;
     const existing = bucket.get(key);
     const variant = `${name}(${signature}) -> ${returnType} [${path.basename(root)}:${moduleName}]`;
     if (!existing) {
@@ -363,6 +375,7 @@ function parseUserParams(paramsText?: string): { names: string[]; types: (string
   const parts = splitArguments(text).map((part) => part.trim()).filter((part) => part.length > 0);
   const names: string[] = [];
   const types: (string | undefined)[] = [];
+  let currentDeclaredType: string | undefined;
 
   for (const part of parts) {
     const normalized = part.replace(/&/g, ' ').trim();
@@ -371,12 +384,18 @@ function parseUserParams(paramsText?: string): { names: string[]; types: (string
       continue;
     }
     const maybeType = tokens[0].toLowerCase();
-    if (tokens.length >= 2 && KNOWN_PARAM_TYPES.has(maybeType)) {
-      types.push(maybeType);
-      names.push(tokens.slice(1).join(' '));
+    if (KNOWN_PARAM_TYPES.has(maybeType)) {
+      if (tokens.length >= 2) {
+        currentDeclaredType = maybeType;
+        types.push(maybeType);
+        names.push(tokens.slice(1).join(' '));
+      } else {
+        currentDeclaredType = maybeType;
+      }
       continue;
     }
-    types.push(undefined);
+
+    types.push(currentDeclaredType);
     names.push(tokens.join(' '));
   }
 
@@ -442,7 +461,7 @@ function collectLeadingComment(lines: string[], lineNumber: number): string {
 }
 
 function scanUserFunctions(root: string, bucket: Map<string, UserFunctionEntry>) {
-  for (const filePath of walk(root, (fullPath) => fullPath.endsWith('.prg') || fullPath.endsWith('.inc'))) {
+  for (const filePath of walk(root, isProjectSourceFile)) {
     let text = '';
     try {
       text = fs.readFileSync(filePath, 'utf8');
@@ -453,7 +472,7 @@ function scanUserFunctions(root: string, bucket: Map<string, UserFunctionEntry>)
     for (const [lineNumber, rawLine] of lines.entries()) {
       const line = stripDeclarationComments(rawLine);
       const match = line.match(
-        /^\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+([A-Za-z_#][A-Za-z0-9_#]*)\s*(?:\(([^)]*)\))?/i,
+        /^\s*(?:(?:private|public|global|local)\s+)?(?:process|procedure|function\s+(?:(?:int|double|float|qword|dword|word|short|byte|string|pointer|variant)\s+)?)\s*([A-Za-z_#][A-Za-z0-9_#]*)\s*(?:\(([^)]*)\))?/i,
       );
       if (!match) {
         continue;
@@ -464,7 +483,7 @@ function scanUserFunctions(root: string, bucket: Map<string, UserFunctionEntry>)
 }
 
 function scanUserMacros(root: string, bucket: Map<string, UserFunctionEntry>) {
-  for (const filePath of walk(root, (fullPath) => fullPath.endsWith('.prg') || fullPath.endsWith('.inc'))) {
+  for (const filePath of walk(root, isProjectSourceFile)) {
     let text = '';
     try {
       text = fs.readFileSync(filePath, 'utf8');
@@ -487,8 +506,6 @@ function collectTopLevelTypedDeclarations(text: string): Map<string, string> {
   const declarations = new Map<string, string>();
   const code = stripCommentsPreservingLength(text);
   const lines = code.split(/\r?\n/);
-  const declarationPattern =
-    /^\s*(?:(?:global|public|private|local)\s+)?(int|double|float|qword|dword|word|short|byte|string|pointer|variant)\b(.*)$/i;
   let inTypeBlock = false;
 
   for (const rawLine of lines) {
@@ -512,22 +529,20 @@ function collectTopLevelTypedDeclarations(text: string): Map<string, string> {
       continue;
     }
 
-    const match = rawLine.match(declarationPattern);
-    if (!match) {
-      continue;
-    }
-    const declaredType = match[1].toLowerCase();
-    const rest = match[2].replace(/;.*$/, '').trim();
-    if (!rest || rest.includes('(')) {
-      continue;
-    }
-    const declarators = splitArguments(rest);
-    for (const declarator of declarators) {
-      const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
-      if (!identifierMatch) {
+    for (const match of rawLine.matchAll(new RegExp(TYPED_DECLARATION_SEGMENT_PATTERN))) {
+      const declaredType = (match[1] ?? '').toLowerCase();
+      const rest = (match[2] ?? '').trim();
+      if (!declaredType || !rest || rest.includes('(')) {
         continue;
       }
-      declarations.set(identifierMatch[0].toUpperCase(), declaredType);
+      const declarators = splitArguments(rest);
+      for (const declarator of declarators) {
+        const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
+        if (!identifierMatch) {
+          continue;
+        }
+        declarations.set(identifierMatch[0].toUpperCase(), declaredType);
+      }
     }
   }
 
@@ -548,7 +563,7 @@ function mergeProjectVariableType(existing: string | undefined, incoming: string
 }
 
 function scanProjectGlobalVariables(root: string, bucket: Map<string, string>) {
-  for (const filePath of walk(root, (fullPath) => fullPath.endsWith('.prg') || fullPath.endsWith('.inc'))) {
+  for (const filePath of walk(root, isProjectSourceFile)) {
     let text = '';
     try {
       text = fs.readFileSync(filePath, 'utf8');
@@ -958,7 +973,7 @@ function findDefinitionInProjectFiles(symbol: string, currentUri: string, versio
   ].filter((root, index, all) => root.length > 0 && all.indexOf(root) === index);
 
   for (const root of searchRoots) {
-    for (const filePath of walk(root, (fullPath) => fullPath.endsWith('.prg') || fullPath.endsWith('.inc'))) {
+    for (const filePath of walk(root, isProjectSourceFile)) {
       let text = '';
       try {
         text = fs.readFileSync(filePath, 'utf8');
@@ -1075,7 +1090,12 @@ function inferLiteralType(argument: string): 'string' | 'number' | 'unknown' {
   if (/^"(?:[^"\\]|\\.)*"$/.test(value) || /^'(?:[^'\\]|\\.)*'$/.test(value)) {
     return 'string';
   }
-  if (/^[-+]?((\d+(\.\d+)?)|(\.\d+))$/.test(value) || /^0x[0-9a-f]+$/i.test(value) || /^[0-9+\-*/%().\s]+$/.test(value)) {
+  if (
+    /^[-+]?((\d+(\.\d+)?)|(\.\d+))$/.test(value) ||
+    /^0x[0-9a-f]+$/i.test(value) ||
+    /^[0-9a-f]+h$/i.test(value) ||
+    /^[0-9+\-*/%().\s]+$/.test(value)
+  ) {
     return 'number';
   }
   return 'unknown';
@@ -1103,7 +1123,7 @@ function isTypeCompatible(expected: string | undefined, actual: ResolvedArgType)
     return true;
   }
   if (expected === 'string') {
-    return actual.kind === 'string';
+    return actual.kind === 'string' || actual.isNullLiteral === true;
   }
   if (expected === 'pointer') {
     return actual.kind === 'pointer' || actual.kind === 'number';
@@ -1365,6 +1385,7 @@ interface CallMatch {
 interface ResolvedArgType {
   kind: 'string' | 'number' | 'pointer' | 'variant' | 'unknown';
   unresolvedIdentifier?: string;
+  isNullLiteral?: boolean;
 }
 
 function buildLineStarts(text: string): number[] {
@@ -1497,12 +1518,17 @@ function normalizeDeclaredType(typeName?: string): 'string' | 'number' | 'pointe
   return 'unknown';
 }
 
+function normalizeMemberAccessPath(memberAccess: string): string {
+  return memberAccess.replace(/\[[^\]\r\n]*\]/g, '');
+}
+
 function resolveMemberAccessType(
   memberAccess: string,
   variableTypes: Map<string, string>,
   typeContext: DocumentTypeContext,
 ): ResolvedArgType {
-  const segments = memberAccess.split('.').map((segment) => segment.trim()).filter((segment) => segment.length > 0);
+  const normalizedAccess = normalizeMemberAccessPath(memberAccess);
+  const segments = normalizedAccess.split('.').map((segment) => segment.trim()).filter((segment) => segment.length > 0);
   if (segments.length < 2) {
     return { kind: 'unknown' };
   }
@@ -1525,6 +1551,10 @@ function resolveMemberAccessType(
     const fieldName = segments[i];
     const field = typeDefinition.fields.find((entry) => entry.name.toUpperCase() === fieldName.toUpperCase());
     if (!field) {
+      if (typeName === 'PROCESS') {
+        // Process instances can expose project-specific public members not present in the core builtin model.
+        return { kind: 'unknown' };
+      }
       return { kind: 'unknown', unresolvedIdentifier: segments.slice(0, i + 1).join('.') };
     }
     currentType = field.type;
@@ -1592,6 +1622,12 @@ function resolveArgumentType(
     return { kind: 'unknown' };
   }
 
+  // Legacy Bennu code commonly uses 0 as NULL for optional string/pointer params
+  // (e.g. exit(0,0)). Keep this strict to null-like zero literals only.
+  if (/^[-+]?0+$/.test(trimmed) || /^0x0+$/i.test(trimmed) || /^0+h$/i.test(trimmed)) {
+    return { kind: 'number', isNullLiteral: true };
+  }
+
   // Bennu selector syntax used in APIs like collision(type mouse), signal(type Proc, ...), get_id(type Proc), etc.
   if (/^type\s+[A-Za-z_#][A-Za-z0-9_#]*$/i.test(trimmed)) {
     return { kind: 'number' };
@@ -1607,7 +1643,10 @@ function resolveArgumentType(
     return { kind: 'pointer' };
   }
 
-  const memberAccessOnly = trimmed.match(/^[A-Za-z_#][A-Za-z0-9_#]*(?:\.[A-Za-z_#][A-Za-z0-9_#]*)+$/);
+  const compactExpression = trimmed.replace(/\s+/g, '');
+  const memberAccessOnly = compactExpression.match(
+    /^[A-Za-z_#][A-Za-z0-9_#]*(?:\[[^\]\r\n]*\])*(?:\.[A-Za-z_#][A-Za-z0-9_#]*(?:\[[^\]\r\n]*\])*)+$/,
+  );
   if (memberAccessOnly && typeContext) {
     return resolveMemberAccessType(memberAccessOnly[0], variableTypes, typeContext);
   }
@@ -1617,13 +1656,54 @@ function resolveArgumentType(
     return resolveIdentifierType(identifierOnly[0], variableTypes, version, typeContext);
   }
 
+  // Single-call expression (e.g. fpg_load("..."), sound_load("..."), myFunc(...)):
+  // infer type from function return type regardless of inner argument syntax.
+  const topLevelCallMatch = trimmed.match(/^([A-Za-z_#][A-Za-z0-9_#]*)\s*\(/);
+  if (topLevelCallMatch) {
+    const name = topLevelCallMatch[1];
+    const openIndex = trimmed.indexOf('(');
+    let depth = 0;
+    let inString = false;
+    let quote = '';
+    let closingIndex = -1;
+
+    for (let i = openIndex; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+      const prev = i > 0 ? trimmed[i - 1] : '';
+      if (inString) {
+        if (ch === quote && prev !== '\\') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"' || ch === '\'') {
+        inString = true;
+        quote = ch;
+        continue;
+      }
+      if (ch === '(') {
+        depth += 1;
+      } else if (ch === ')') {
+        depth -= 1;
+        if (depth === 0) {
+          closingIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (closingIndex > 0 && trimmed.slice(closingIndex + 1).trim().length === 0) {
+      return resolveIdentifierType(name, variableTypes, version, typeContext);
+    }
+  }
+
   // Best-effort type inference for arithmetic expressions that include identifiers.
   if (/^[A-Za-z0-9_#\s+\-*/%().[\]]+$/.test(trimmed)) {
     let expressionForIdentifiers = trimmed;
     const unresolvedMemberAccesses: string[] = [];
     if (typeContext) {
       expressionForIdentifiers = expressionForIdentifiers.replace(
-        /\b[A-Za-z_#][A-Za-z0-9_#]*(?:\.[A-Za-z_#][A-Za-z0-9_#]*)+\b/g,
+        INDEXED_MEMBER_ACCESS_PATTERN,
         (memberAccess) => {
           const resolved = resolveMemberAccessType(memberAccess, variableTypes, typeContext);
           if (resolved.unresolvedIdentifier) {
@@ -1645,9 +1725,11 @@ function resolveArgumentType(
       return { kind: 'unknown', unresolvedIdentifier: unresolvedMemberAccesses[0] };
     }
 
-    const identifiers = [...expressionForIdentifiers.matchAll(/\b([A-Za-z_#][A-Za-z0-9_#]*)\b/g)].map((match) => match[1]);
+    const identifiers = [...expressionForIdentifiers.matchAll(/\b([A-Za-z_#][A-Za-z0-9_#]*)\b/g)]
+      .map((match) => match[1])
+      .filter((identifier) => !EXPRESSION_OPERATOR_KEYWORDS.has(identifier.toUpperCase()));
     if (identifiers.length === 0) {
-      return { kind: inferLiteralType(trimmed) };
+      return { kind: 'number' };
     }
     const unresolved = identifiers
       .map((identifier) => resolveIdentifierType(identifier, variableTypes, version, typeContext))
@@ -1675,18 +1757,16 @@ function collectDeclaredVariableTypes(text: string): Map<string, string> {
   const declarations = new Map<string, string>();
   const code = stripCommentsPreservingLength(text);
   const lines = code.split(/\r?\n/);
-  const declarationPattern =
-    /^\s*(?:(?:local|global|private|public)\s+)?(int|double|float|qword|dword|word|short|byte|string|pointer|variant)\b(.*)$/i;
   const functionHeaderPattern =
-    /(?:^|\n)\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+[A-Za-z_#][A-Za-z0-9_#]*\s*\(([\s\S]*?)\)/gi;
+    /(?:^|\n)\s*(?:(?:private|public|global|local)\s+)?(?:process|procedure|function\s+(?:(?:int|double|float|qword|dword|word|short|byte|string|pointer|variant)\s+)?)\s*[A-Za-z_#][A-Za-z0-9_#]*\s*\(([\s\S]*?)\)/gi;
 
   for (const match of code.matchAll(functionHeaderPattern)) {
     const paramsText = match[1] ?? '';
     const parsed = parseUserParams(paramsText);
     for (let i = 0; i < parsed.names.length; i += 1) {
       const name = parsed.names[i]?.trim();
-      const type = parsed.types[i]?.trim().toLowerCase();
-      if (!name || !type || !/^[A-Za-z_#][A-Za-z0-9_#]*$/.test(name)) {
+      const type = parsed.types[i]?.trim().toLowerCase() ?? 'variant';
+      if (!name || !/^[A-Za-z_#][A-Za-z0-9_#]*$/.test(name)) {
         continue;
       }
       declarations.set(name.toUpperCase(), type);
@@ -1697,23 +1777,21 @@ function collectDeclaredVariableTypes(text: string): Map<string, string> {
     if (!line.trim() || isLineCommentedOnly(line)) {
       continue;
     }
-    const match = line.match(declarationPattern);
-    if (!match) {
-      continue;
-    }
-    const declaredType = match[1].toLowerCase();
-    const rest = match[2].replace(/;.*$/, '').trim();
-    if (!rest || rest.includes('(')) {
-      continue;
-    }
-    const declarators = splitArguments(rest);
-    for (const declarator of declarators) {
-      const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
-      if (!identifierMatch) {
+    for (const match of line.matchAll(new RegExp(TYPED_DECLARATION_SEGMENT_PATTERN))) {
+      const declaredType = (match[1] ?? '').toLowerCase();
+      const rest = (match[2] ?? '').trim();
+      if (!declaredType || !rest || rest.includes('(')) {
         continue;
       }
-      const identifier = identifierMatch[0];
-      declarations.set(identifier.toUpperCase(), declaredType);
+      const declarators = splitArguments(rest);
+      for (const declarator of declarators) {
+        const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
+        if (!identifierMatch) {
+          continue;
+        }
+        const identifier = identifierMatch[0];
+        declarations.set(identifier.toUpperCase(), declaredType);
+      }
     }
   }
 
@@ -1729,30 +1807,26 @@ interface RoutineScopeContext {
 function collectTypedDeclarationsFromCodeSegment(codeSegment: string): Map<string, string> {
   const declarations = new Map<string, string>();
   const lines = codeSegment.split(/\r?\n/);
-  const declarationPattern =
-    /^\s*(?:(?:local|global|private|public)\s+)?(int|double|float|qword|dword|word|short|byte|string|pointer|variant)\b(.*)$/i;
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) {
       continue;
     }
-    const match = line.match(declarationPattern);
-    if (!match) {
-      continue;
-    }
-    const declaredType = match[1].toLowerCase();
-    const rest = match[2].replace(/;.*$/, '').trim();
-    if (!rest || rest.includes('(')) {
-      continue;
-    }
-    const declarators = splitArguments(rest);
-    for (const declarator of declarators) {
-      const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
-      if (!identifierMatch) {
+    for (const match of line.matchAll(new RegExp(TYPED_DECLARATION_SEGMENT_PATTERN))) {
+      const declaredType = (match[1] ?? '').toLowerCase();
+      const rest = (match[2] ?? '').trim();
+      if (!declaredType || !rest || rest.includes('(')) {
         continue;
       }
-      declarations.set(identifierMatch[0].toUpperCase(), declaredType);
+      const declarators = splitArguments(rest);
+      for (const declarator of declarators) {
+        const identifierMatch = declarator.match(/[A-Za-z_#][A-Za-z0-9_#]*/);
+        if (!identifierMatch) {
+          continue;
+        }
+        declarations.set(identifierMatch[0].toUpperCase(), declaredType);
+      }
     }
   }
 
@@ -1763,7 +1837,7 @@ function collectRoutineScopeContexts(text: string): RoutineScopeContext[] {
   const contexts: RoutineScopeContext[] = [];
   const code = stripCommentsPreservingLength(text);
   const headerPattern =
-    /(?:^|\n)\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+[A-Za-z_#][A-Za-z0-9_#]*\s*\(([\s\S]*?)\)/gi;
+    /(?:^|\n)\s*(?:(?:private|public|global|local)\s+)?(?:process|procedure|function\s+(?:(?:int|double|float|qword|dword|word|short|byte|string|pointer|variant)\s+)?)\s*[A-Za-z_#][A-Za-z0-9_#]*\s*\(([\s\S]*?)\)/gi;
   const headers: Array<{ startOffset: number; headerEndOffset: number; paramsText: string }> = [];
 
   for (const match of code.matchAll(headerPattern)) {
@@ -1785,8 +1859,8 @@ function collectRoutineScopeContexts(text: string): RoutineScopeContext[] {
     const params = parseUserParams(header.paramsText);
     for (let paramIndex = 0; paramIndex < params.names.length; paramIndex += 1) {
       const name = params.names[paramIndex]?.trim();
-      const type = params.types[paramIndex]?.trim().toLowerCase();
-      if (!name || !type || !/^[A-Za-z_#][A-Za-z0-9_#]*$/.test(name)) {
+      const type = params.types[paramIndex]?.trim().toLowerCase() ?? 'variant';
+      if (!name || !/^[A-Za-z_#][A-Za-z0-9_#]*$/.test(name)) {
         continue;
       }
       variableTypes.set(name.toUpperCase(), type);
@@ -2310,7 +2384,7 @@ function shouldSkipCallValidation(text: string, callStartOffset: number): boolea
   const lineStart = text.lastIndexOf('\n', Math.max(callStartOffset - 1, 0)) + 1;
   const prefix = text.slice(lineStart, callStartOffset);
 
-  if (/^\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+$/i.test(prefix)) {
+  if (/^\s*(?:declare\s+)?(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+$/i.test(prefix)) {
     return true;
   }
   if (/^\s*#define\s+$/i.test(prefix)) {
@@ -2340,7 +2414,7 @@ function collectLiveDiagnostics(text: string, version: BennuVersion): Diagnostic
     const codeForTokens = codeForTokenDiagnostics(lineWithoutComments);
     const isMacroDefinitionLine = macroDefinitionLines.has(lineNumber);
 
-    const invalidTokenPattern = /\b\d+[A-Za-z_][A-Za-z0-9_]*\b/g;
+    const invalidTokenPattern = /\b(?!0x[0-9a-f]+\b)(?![0-9a-f]+h\b)\d+[A-Za-z_][A-Za-z0-9_]*\b/gi;
     for (const match of codeForTokens.matchAll(invalidTokenPattern)) {
       const token = match[0];
       const start = match.index ?? 0;
@@ -2378,10 +2452,10 @@ function collectLiveDiagnostics(text: string, version: BennuVersion): Diagnostic
     }
 
     if (
-      /^(#|program\b|import\b|include\b|global\b|local\b|public\b|private\b|type\b|process\b|function\b|procedure\b|begin\b|end\b|else\b|elseif\b|if\b|for\b|while\b|loop\b|repeat\b|until\b|switch\b|case\b|default\b|break\b|return\b)/i.test(
+      /^(#|program\b|import\b|include\b|declare\b|global\b|local\b|public\b|private\b|type\b|process\b|function\b|procedure\b|begin\b|end\b|else\b|elseif\b|if\b|for\b|while\b|loop\b|repeat\b|until\b|switch\b|case\b|default\b|break\b|return\b)/i.test(
         trimmed,
       ) ||
-      /^(#|program\b|import\b|include\b|global\b|local\b|public\b|private\b|type\b|process\b|function\b|procedure\b|begin\b|end\b|else\b|elseif\b|if\b|for\b|while\b|loop\b|repeat\b|until\b|switch\b|case\b|default\b|break\b|return\b)/i.test(
+      /^(#|program\b|import\b|include\b|declare\b|global\b|local\b|public\b|private\b|type\b|process\b|function\b|procedure\b|begin\b|end\b|else\b|elseif\b|if\b|for\b|while\b|loop\b|repeat\b|until\b|switch\b|case\b|default\b|break\b|return\b)/i.test(
         trailingStatement,
       )
     ) {
