@@ -9,8 +9,11 @@ import {
   DocumentSymbol,
   Hover,
   InitializeParams,
+  ParameterInformation,
   ProposedFeatures,
   Location,
+  SignatureHelp,
+  SignatureInformation,
   SymbolKind,
   TextDocuments,
   TextDocumentSyncKind,
@@ -49,6 +52,18 @@ interface DefinitionEntry {
   definitionLine: number;
 }
 
+interface UserFunctionEntry {
+  key: string;
+  name: string;
+  arities: number[];
+  signatures: string[];
+  parameterNames: string[][];
+  parameterTypes: (string | undefined)[][];
+  description: string;
+  definitionUri: string;
+  definitionLine: number;
+}
+
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 
@@ -60,6 +75,7 @@ let sharedSourceRoots: string[] = [];
 let sourceRootsByVersion: Record<BennuVersion, string[]> = { v1: [], v2: [] };
 let compilerPathByVersion: Record<BennuVersion, string> = { v1: '', v2: '' };
 let symbolIndexByVersion: Record<BennuVersion, Map<string, SymbolEntry>> = { v1: new Map(), v2: new Map() };
+let userFunctionIndexByVersion: Record<BennuVersion, Map<string, UserFunctionEntry>> = { v1: new Map(), v2: new Map() };
 const openDocuments = new Map<string, string>();
 const documentVersions = new Map<string, BennuVersion>();
 
@@ -89,6 +105,9 @@ const PARAM_MAP: Record<string, string[]> = {
   F: ['float'],
   W: ['word'],
 };
+
+const NUMERIC_TYPES = new Set(['int', 'double', 'float', 'qword', 'dword', 'word', 'short', 'byte']);
+const KNOWN_PARAM_TYPES = new Set(['int', 'double', 'float', 'qword', 'dword', 'word', 'short', 'byte', 'string', 'pointer', 'variant']);
 
 const BENNUGD_KEYWORDS = [
   'begin',
@@ -298,10 +317,178 @@ function scanRoot(root: string, bucket: Map<string, SymbolEntry>) {
   }
 }
 
+function stripDeclarationComments(line: string): string {
+  let output = '';
+  let inString = false;
+  let quote = '';
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    const next = line[i + 1] ?? '';
+    if (inString) {
+      if (ch === quote && line[i - 1] !== '\\') {
+        inString = false;
+      }
+      output += ch;
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      inString = true;
+      quote = ch;
+      output += ch;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      return output;
+    }
+    output += ch;
+  }
+  return output;
+}
+
+function countDeclarationParams(paramsText?: string): number {
+  const text = (paramsText ?? '').trim();
+  if (!text) {
+    return 0;
+  }
+  return splitArguments(text).length;
+}
+
+function parseUserParams(paramsText?: string): { names: string[]; types: (string | undefined)[] } {
+  const text = (paramsText ?? '').trim();
+  if (!text) {
+    return { names: [], types: [] };
+  }
+  const parts = splitArguments(text).map((part) => part.trim()).filter((part) => part.length > 0);
+  const names: string[] = [];
+  const types: (string | undefined)[] = [];
+
+  for (const part of parts) {
+    const normalized = part.replace(/&/g, ' ').trim();
+    const tokens = normalized.split(/\s+/).filter((token) => token.length > 0);
+    if (tokens.length === 0) {
+      continue;
+    }
+    const maybeType = tokens[0].toLowerCase();
+    if (tokens.length >= 2 && KNOWN_PARAM_TYPES.has(maybeType)) {
+      types.push(maybeType);
+      names.push(tokens.slice(1).join(' '));
+      continue;
+    }
+    types.push(undefined);
+    names.push(tokens.join(' '));
+  }
+
+  return { names, types };
+}
+
+function addUserFunction(
+  bucket: Map<string, UserFunctionEntry>,
+  filePath: string,
+  lineNumber: number,
+  name: string,
+  description: string,
+  paramsText?: string,
+) {
+  const key = name.toUpperCase();
+  const arity = countDeclarationParams(paramsText);
+  const parsedParams = parseUserParams(paramsText);
+  const signature = `${name}(${(paramsText ?? '').trim()})`;
+  const existing = bucket.get(key);
+  if (!existing) {
+    bucket.set(key, {
+      key,
+      name,
+      arities: [arity],
+      signatures: [signature],
+      parameterNames: [parsedParams.names],
+      parameterTypes: [parsedParams.types],
+      description,
+      definitionUri: pathToUri(filePath),
+      definitionLine: lineNumber,
+    });
+    return;
+  }
+  if (!existing.arities.includes(arity)) {
+    existing.arities.push(arity);
+  }
+  if (!existing.signatures.includes(signature)) {
+    existing.signatures.push(signature);
+    existing.parameterNames.push(parsedParams.names);
+    existing.parameterTypes.push(parsedParams.types);
+  }
+  if (!existing.description && description) {
+    existing.description = description;
+  }
+}
+
+function collectLeadingComment(lines: string[], lineNumber: number): string {
+  const comments: string[] = [];
+  for (let i = lineNumber - 1; i >= 0; i -= 1) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
+      if (comments.length > 0) {
+        break;
+      }
+      continue;
+    }
+    if (!trimmed.startsWith('//')) {
+      break;
+    }
+    comments.unshift(trimmed.replace(/^\/\/+\s?/, '').trim());
+  }
+  return comments.join(' ').trim();
+}
+
+function scanUserFunctions(root: string, bucket: Map<string, UserFunctionEntry>) {
+  for (const filePath of walk(root, (fullPath) => fullPath.endsWith('.prg') || fullPath.endsWith('.inc'))) {
+    let text = '';
+    try {
+      text = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = text.split(/\r?\n/);
+    for (const [lineNumber, rawLine] of lines.entries()) {
+      const line = stripDeclarationComments(rawLine);
+      const match = line.match(
+        /^\s*(?:(?:private|public|global|local)\s+)?(?:process|function|procedure)\s+([A-Za-z_#][A-Za-z0-9_#]*)\s*(?:\(([^)]*)\))?/i,
+      );
+      if (!match) {
+        continue;
+      }
+      addUserFunction(bucket, filePath, lineNumber, match[1], collectLeadingComment(lines, lineNumber), match[2]);
+    }
+  }
+}
+
+function scanUserMacros(root: string, bucket: Map<string, UserFunctionEntry>) {
+  for (const filePath of walk(root, (fullPath) => fullPath.endsWith('.prg') || fullPath.endsWith('.inc'))) {
+    let text = '';
+    try {
+      text = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = text.split(/\r?\n/);
+    for (const [lineNumber, rawLine] of lines.entries()) {
+      const line = stripDeclarationComments(rawLine);
+      const match = line.match(/^\s*#define\s+([A-Za-z_#][A-Za-z0-9_#]*)\s*\(([^)]*)\)/i);
+      if (!match) {
+        continue;
+      }
+      addUserFunction(bucket, filePath, lineNumber, match[1], collectLeadingComment(lines, lineNumber), match[2]);
+    }
+  }
+}
+
 function rebuildIndex() {
   const next: Record<BennuVersion, Map<string, SymbolEntry>> = {
     v1: new Map<string, SymbolEntry>(),
     v2: new Map<string, SymbolEntry>(),
+  };
+  const nextUser: Record<BennuVersion, Map<string, UserFunctionEntry>> = {
+    v1: new Map<string, UserFunctionEntry>(),
+    v2: new Map<string, UserFunctionEntry>(),
   };
   const rootsByVersion: Record<BennuVersion, string[]> = {
     v1: [...sharedSourceRoots, ...sourceRootsByVersion.v1],
@@ -312,10 +499,13 @@ function rebuildIndex() {
     const uniqueRoots = [...new Set(rootsByVersion[version].filter((entry) => entry.length > 0))];
     for (const root of uniqueRoots) {
       scanRoot(root, next[version]);
+      scanUserFunctions(root, nextUser[version]);
+      scanUserMacros(root, nextUser[version]);
     }
   }
 
   symbolIndexByVersion = next;
+  userFunctionIndexByVersion = nextUser;
 }
 
 function wordAt(text: string, offset: number): string {
@@ -330,11 +520,24 @@ function wordAt(text: string, offset: number): string {
   return text.slice(start, end);
 }
 
+function identifierAt(text: string, offset: number): string {
+  if (offset >= 0 && offset < text.length && /[A-Za-z0-9_#]/.test(text[offset])) {
+    return wordAt(text, offset);
+  }
+  if (offset - 1 >= 0 && /[A-Za-z0-9_#]/.test(text[offset - 1])) {
+    return wordAt(text, offset - 1);
+  }
+  return '';
+}
+
 function positionToOffset(text: string, line: number, character: number): number {
-  const lines = text.split(/\r?\n/);
   let offset = 0;
-  for (let i = 0; i < Math.min(line, lines.length); i += 1) {
-    offset += lines[i].length + 1;
+  let currentLine = 0;
+  while (offset < text.length && currentLine < line) {
+    if (text[offset] === '\n') {
+      currentLine += 1;
+    }
+    offset += 1;
   }
   return Math.min(offset + character, text.length);
 }
@@ -342,6 +545,81 @@ function positionToOffset(text: string, line: number, character: number): number
 function currentLinePrefix(text: string, offset: number): string {
   const lineStart = text.lastIndexOf('\n', Math.max(offset - 1, 0)) + 1;
   return text.slice(lineStart, offset);
+}
+
+interface CallContext {
+  name: string;
+  argumentIndex: number;
+}
+
+function callContextAt(text: string, offset: number): CallContext | undefined {
+  const prefix = currentLinePrefix(text, offset);
+  const stack: CallContext[] = [];
+  let inString = false;
+  let quote = '';
+
+  for (let i = 0; i < prefix.length; i += 1) {
+    const ch = prefix[i];
+    const next = prefix[i + 1] ?? '';
+
+    if (!inString && ch === '/' && next === '/') {
+      break;
+    }
+
+    if (inString) {
+      if (ch === quote && prefix[i - 1] !== '\\') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === '\'') {
+      inString = true;
+      quote = ch;
+      continue;
+    }
+
+    if (ch === '(') {
+      let j = i - 1;
+      while (j >= 0 && /\s/.test(prefix[j])) {
+        j -= 1;
+      }
+      const end = j + 1;
+      while (j >= 0 && /[A-Za-z0-9_#]/.test(prefix[j])) {
+        j -= 1;
+      }
+      const start = j + 1;
+      const name = prefix.slice(start, end);
+      stack.push({ name, argumentIndex: 0 });
+      continue;
+    }
+
+    if (ch === ',' && stack.length > 0) {
+      stack[stack.length - 1].argumentIndex += 1;
+      continue;
+    }
+
+    if (ch === ')' && stack.length > 0) {
+      stack.pop();
+    }
+  }
+
+  for (let i = stack.length - 1; i >= 0; i -= 1) {
+    const ctx = stack[i];
+    if (ctx.name) {
+      return ctx;
+    }
+  }
+  return undefined;
+}
+
+function symbolAtOrNearOffset(text: string, offset: number): string {
+  const direct = identifierAt(text, offset);
+  if (direct) {
+    return direct;
+  }
+  const ctx = callContextAt(text, offset);
+  return ctx?.name ?? '';
 }
 
 function isFunctionCallContext(text: string, offset: number): boolean {
@@ -458,7 +736,7 @@ function signatureText(entry: SymbolEntry): string {
     .split('')
     .filter((ch) => ch !== '+')
     .flatMap((ch) => PARAM_MAP[ch] ?? [ch.toLowerCase()]);
-  return `${displayName}(${params.join(', ')})`;
+  return `${displayName}(${params.map((type, index) => `${type} arg${index + 1}`).join(', ')})`;
 }
 
 function signatureArity(signature: string): number {
@@ -487,6 +765,17 @@ function hoverText(entry: SymbolEntry): string {
   if (entry.source) {
     lines.push(`Source: \`${entry.source}\``);
   }
+  const firstSignature = entry.signatures.length > 0 ? entry.signatures[0] : entry.signature;
+  const params = firstSignature
+    .split('')
+    .filter((ch) => ch !== '+')
+    .flatMap((ch) => PARAM_MAP[ch] ?? [ch.toLowerCase()]);
+  if (params.length > 0) {
+    lines.push('', 'Parameters:');
+    for (let i = 0; i < params.length; i += 1) {
+      lines.push(`- \`${params[i]} arg${i + 1}\` (${i + 1}/${params.length}, remaining ${params.length - i - 1})`);
+    }
+  }
   if (entry.variants.length > 0) {
     lines.push('', 'Variants:');
     for (const variant of entry.variants) {
@@ -494,6 +783,143 @@ function hoverText(entry: SymbolEntry): string {
     }
   }
   return lines.join('\n').trim();
+}
+
+function userFunctionHoverText(entry: UserFunctionEntry): string {
+  const signatures = entry.signatures.length > 0 ? entry.signatures : [`${entry.name}()`];
+  const lines = [`**${signatures[0]}**`, 'User-defined function/process'];
+  if (entry.description) {
+    lines.push('', entry.description);
+  }
+  const names = entry.parameterNames[0] ?? [];
+  const types = entry.parameterTypes[0] ?? [];
+  if (names.length > 0) {
+    lines.push('', 'Parameters:');
+    for (let i = 0; i < names.length; i += 1) {
+      const type = types[i] ?? 'variant';
+      lines.push(`- \`${type} ${names[i]}\` (${i + 1}/${names.length}, remaining ${names.length - i - 1})`);
+    }
+  }
+  if (signatures.length > 1) {
+    lines.push('', 'Variants:');
+    for (const variant of signatures.slice(1)) {
+      lines.push(`- \`${variant}\``);
+    }
+  }
+  return lines.join('\n').trim();
+}
+
+function inferLiteralType(argument: string): 'string' | 'number' | 'unknown' {
+  const value = argument.trim();
+  if (!value) {
+    return 'unknown';
+  }
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith('\'') && value.endsWith('\'')) ||
+    /"(?:[^"\\]|\\.)*"/.test(value) ||
+    /'(?:[^'\\]|\\.)*'/.test(value)
+  ) {
+    return 'string';
+  }
+  if (/^[-+]?((\d+(\.\d+)?)|(\.\d+))$/.test(value) || /^0x[0-9a-f]+$/i.test(value) || /^[0-9+\-*/%().\s]+$/.test(value)) {
+    return 'number';
+  }
+  return 'unknown';
+}
+
+function coreSignatureParamTypes(signature: string): (string | undefined)[] {
+  return signature
+    .split('')
+    .filter((ch) => ch !== '+')
+    .flatMap((ch) => PARAM_MAP[ch] ?? [undefined])
+    .map((entry) => entry ?? undefined);
+}
+
+function isTypeCompatible(expected: string | undefined, actual: 'string' | 'number' | 'unknown'): boolean {
+  if (!expected || actual === 'unknown' || expected === 'variant') {
+    return true;
+  }
+  if (expected === 'string') {
+    return actual === 'string';
+  }
+  if (NUMERIC_TYPES.has(expected)) {
+    return actual === 'number';
+  }
+  return true;
+}
+
+function coreEntrySignatureInfo(entry: SymbolEntry): SignatureInformation[] {
+  const signatures = entry.signatures.length > 0 ? entry.signatures : [entry.signature];
+  return signatures.map((sig) => {
+    const params = sig
+      .split('')
+      .filter((ch) => ch !== '+')
+      .flatMap((ch) => PARAM_MAP[ch] ?? [ch.toLowerCase()]);
+    const typedParams = params.map((param, index) => `${param} arg${index + 1}`);
+    const label = `${entry.name.toLowerCase()}(${typedParams.join(', ')})`;
+    const documentation = [entry.description, entry.module ? `Module: ${entry.module}` : '', entry.source ? `Source: ${entry.source}` : '']
+      .filter((part) => part.length > 0)
+      .join('\n');
+    return SignatureInformation.create(
+      label,
+      documentation,
+      ...params.map((param, index) =>
+        ParameterInformation.create(
+          `${param} arg${index + 1}`,
+          `Parameter ${index + 1} of ${params.length}. Remaining after this: ${Math.max(params.length - index - 1, 0)}.`,
+        )),
+    );
+  });
+}
+
+function coreSignatureLabels(entry: SymbolEntry): string[] {
+  const signatures = entry.signatures.length > 0 ? entry.signatures : [entry.signature];
+  return signatures.map((sig) => {
+    const params = sig
+      .split('')
+      .filter((ch) => ch !== '+')
+      .flatMap((ch) => PARAM_MAP[ch] ?? [ch.toLowerCase()]);
+    return `${entry.name.toLowerCase()}(${params.map((type, index) => `${type} arg${index + 1}`).join(', ')})`;
+  });
+}
+
+function userSignatureLabels(entry: UserFunctionEntry): string[] {
+  const signatures = entry.signatures.length > 0 ? entry.signatures : [`${entry.name}()`];
+  return signatures.map((_, index) => {
+    const names = entry.parameterNames[index] ?? [];
+    const types = entry.parameterTypes[index] ?? [];
+    const params = names.map((name, paramIndex) => `${types[paramIndex] ?? 'variant'} ${name}`.trim());
+    return `${entry.name}(${params.join(', ')})`;
+  });
+}
+
+function expectedSignaturesText(entry?: SymbolEntry, userEntry?: UserFunctionEntry): string | undefined {
+  const labels = userEntry ? userSignatureLabels(userEntry) : entry ? coreSignatureLabels(entry) : [];
+  if (labels.length === 0) {
+    return undefined;
+  }
+  const shown = labels.slice(0, 3).map((label) => `\`${label}\``);
+  const suffix = labels.length > 3 ? ` (+${labels.length - 3} more)` : '';
+  return `Expected signatures: ${shown.join(' | ')}${suffix}`;
+}
+
+function userEntrySignatureInfo(entry: UserFunctionEntry): SignatureInformation[] {
+  const signatures = userSignatureLabels(entry);
+  return signatures.map((sig, index) => {
+    const params = entry.parameterNames[index] ?? [];
+    return SignatureInformation.create(
+      sig,
+      entry.description ? `User-defined function/process\n${entry.description}` : 'User-defined function/process',
+      ...params.map((param, paramIndex) => {
+        const type = entry.parameterTypes[index]?.[paramIndex] ?? 'variant';
+        return ParameterInformation.create(
+          `${type} ${param}`.trim(),
+          `Parameter ${paramIndex + 1} of ${params.length}. Remaining after this: ${Math.max(params.length - paramIndex - 1, 0)}.`,
+        );
+      }),
+    );
+  });
 }
 
 function keywordItems(prefix: string) {
@@ -743,18 +1169,14 @@ function extractCallMatches(line: string): CallMatch[] {
   return matches;
 }
 
-function isSimpleArgumentList(args: string): boolean {
-  return !/[()"'\\]/.test(args);
-}
-
 function collectLiveDiagnostics(text: string, version: BennuVersion): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const lines = text.split(/\r?\n/);
   const index = getIndex(version);
+  const userFunctions = userFunctionIndexByVersion[version];
 
   for (const [lineNumber, line] of lines.entries()) {
     const codeForTokens = codeForTokenDiagnostics(line);
-    const codeForCalls = codeWithoutComments(line);
 
     const invalidTokenPattern = /\b\d+[A-Za-z_][A-Za-z0-9_]*\b/g;
     for (const match of codeForTokens.matchAll(invalidTokenPattern)) {
@@ -771,21 +1193,74 @@ function collectLiveDiagnostics(text: string, version: BennuVersion): Diagnostic
     for (const match of extractCallMatches(line)) {
       const callName = match.name.toUpperCase();
       const entry = index.get(callName);
-      if (!entry || entry.kind !== 'function' || !entry.signature) {
+      const userEntry = userFunctions.get(callName);
+      const expectedArgs =
+        userEntry
+          ? userEntry.arities
+          : entry && entry.kind === 'function' && entry.signature
+            ? signatureArities(entry)
+            : [];
+      const displayName = userEntry?.name ?? entry?.name ?? match.name;
+      if (expectedArgs.length === 0) {
         continue;
       }
 
       const actualArgs = splitArguments(match.args);
-      if (!isSimpleArgumentList(match.args)) {
-        continue;
-      }
-      const expectedArgs = signatureArities(entry);
       if (!expectedArgs.includes(actualArgs.length)) {
+        const signatureHint = expectedSignaturesText(entry, userEntry);
+        const descriptionHint = userEntry?.description || entry?.description;
+        const detailLines = [
+          `${displayName} expects ${expectedArgs.join(' or ')} argument(s) but got ${actualArgs.length}.`,
+          signatureHint,
+          descriptionHint ? `Description: ${descriptionHint}` : undefined,
+        ].filter((line): line is string => Boolean(line));
         diagnostics.push({
           severity: DiagnosticSeverity.Warning,
           range: toRange(lineNumber, match.start, match.end),
           source: 'bennugd',
-          message: `${entry.name} expects ${expectedArgs.join(' or ')} argument(s) but got ${actualArgs.length}.`,
+          message: detailLines.join('\n'),
+        });
+        continue;
+      }
+
+      const candidateParamTypes: (string | undefined)[][] = [];
+      if (userEntry) {
+        for (const types of userEntry.parameterTypes) {
+          if (types.length === actualArgs.length) {
+            candidateParamTypes.push(types);
+          }
+        }
+      } else if (entry && entry.kind === 'function') {
+        const signatures = entry.signatures.length > 0 ? entry.signatures : [entry.signature];
+        for (const sig of signatures) {
+          const types = coreSignatureParamTypes(sig);
+          if (types.length === actualArgs.length) {
+            candidateParamTypes.push(types);
+          }
+        }
+      }
+
+      if (candidateParamTypes.length === 0) {
+        continue;
+      }
+
+      const actualTypes = actualArgs.map(inferLiteralType);
+      const hasCompatibleSignature = candidateParamTypes.some((paramTypes) =>
+        paramTypes.every((expected, index) => isTypeCompatible(expected, actualTypes[index])));
+
+      if (!hasCompatibleSignature) {
+        const signatureHint = expectedSignaturesText(entry, userEntry);
+        const descriptionHint = userEntry?.description || entry?.description;
+        const detailLines = [
+          `${displayName} argument types do not match expected signature.`,
+          signatureHint,
+          descriptionHint ? `Description: ${descriptionHint}` : undefined,
+        ].filter((line): line is string => Boolean(line));
+        diagnostics.push({
+          severity: DiagnosticSeverity.Warning,
+          range: toRange(lineNumber, match.start, match.end),
+          source: 'bennugd',
+          message: detailLines.join('\n'),
         });
       }
     }
@@ -850,7 +1325,7 @@ connection.onInitialize((params: InitializeParams) => {
       textDocumentSync: TextDocumentSyncKind.Incremental,
       completionProvider: { triggerCharacters: ['_', '#'] },
       hoverProvider: true,
-      definitionProvider: true,
+      signatureHelpProvider: { triggerCharacters: ['(', ','], retriggerCharacters: [','] },
       documentSymbolProvider: true,
     },
   };
@@ -886,23 +1361,51 @@ connection.onCompletion((params) => {
   const prefix = wordAt(text, offset).toUpperCase();
   const version = getDocumentVersion(params.textDocument.uri);
   const index = getIndex(version);
+  const userIndex = userFunctionIndexByVersion[version];
   const functionContext = isFunctionCallContext(text, offset);
-  const items = [
-    ...keywordItems(prefix),
-    ...[...index.values()]
-      .filter((entry) => entry.kind !== 'function' || functionContext)
+  const coreItems = [...index.values()]
+    .filter((entry) => entry.kind !== 'function' || functionContext)
+    .filter((entry) => !prefix || entry.key.startsWith(prefix))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, 200)
+    .map((entry) => ({
+      label: entry.kind === 'function' ? entry.name.toLowerCase() : entry.name,
+      kind: entry.kind === 'function' ? CompletionItemKind.Function : CompletionItemKind.Constant,
+      detail: signatureText(entry),
+      documentation: hoverText(entry),
+      insertText: entry.kind === 'function' ? entry.name.toLowerCase() : entry.name,
+      filterText: entry.key,
+      sortText: entry.kind === 'function' ? `1_${entry.key}` : `2_${entry.key}`,
+    }));
+  const userItems = functionContext
+    ? [...userIndex.values()]
       .filter((entry) => !prefix || entry.key.startsWith(prefix))
       .sort((a, b) => a.name.localeCompare(b.name))
       .slice(0, 200)
       .map((entry) => ({
-        label: entry.kind === 'function' ? entry.name.toLowerCase() : entry.name,
-        kind: entry.kind === 'function' ? CompletionItemKind.Function : CompletionItemKind.Constant,
-        detail: signatureText(entry),
-        documentation: hoverText(entry),
-        insertText: entry.kind === 'function' ? entry.name.toLowerCase() : entry.name,
+        label: entry.name,
+        kind: CompletionItemKind.Function,
+        detail: entry.signatures[0] ?? `${entry.name}()`,
+        documentation: userFunctionHoverText(entry),
+        insertText: entry.name,
         filterText: entry.key,
-        sortText: entry.kind === 'function' ? `1_${entry.key}` : `2_${entry.key}`,
-      })),
+        sortText: `1_${entry.key}`,
+      }))
+    : [];
+
+  const seenLabels = new Set<string>();
+  const mergedFunctionItems = [...userItems, ...coreItems].filter((item) => {
+    const key = String(item.label).toUpperCase();
+    if (seenLabels.has(key)) {
+      return false;
+    }
+    seenLabels.add(key);
+    return true;
+  });
+
+  const items = [
+    ...keywordItems(prefix),
+    ...mergedFunctionItems,
   ];
   return { isIncomplete: functionContext, items };
 });
@@ -910,27 +1413,80 @@ connection.onCompletion((params) => {
 connection.onHover((params): Hover | undefined => {
   const text = openDocuments.get(params.textDocument.uri) ?? '';
   const offset = positionToOffset(text, params.position.line, params.position.character);
-  const entry = getIndex(getDocumentVersion(params.textDocument.uri)).get(wordAt(text, offset).toUpperCase());
-  if (!entry) {
+  const symbol = identifierAt(text, offset).toUpperCase();
+  if (!symbol) {
     return undefined;
   }
+  const version = getDocumentVersion(params.textDocument.uri);
+  const userEntry = userFunctionIndexByVersion[version].get(symbol);
+  if (userEntry) {
+    return {
+      contents: {
+        kind: 'markdown',
+        value: userFunctionHoverText(userEntry),
+      },
+    };
+  }
+
+  const entry = getIndex(version).get(symbol);
+  if (entry) {
+    return {
+      contents: {
+        kind: 'markdown',
+        value: hoverText(entry),
+      },
+    };
+  }
+  return undefined;
+});
+
+connection.onSignatureHelp((params): SignatureHelp | undefined => {
+  const text = openDocuments.get(params.textDocument.uri) ?? '';
+  const offset = positionToOffset(text, params.position.line, params.position.character);
+  const version = getDocumentVersion(params.textDocument.uri);
+  const ctx = callContextAt(text, offset);
+  if (!ctx?.name) {
+    return undefined;
+  }
+
+  const key = ctx.name.toUpperCase();
+  const coreEntry = getIndex(version).get(key);
+  const userEntry = userFunctionIndexByVersion[version].get(key);
+  const signatures = userEntry
+    ? userEntrySignatureInfo(userEntry)
+    : coreEntry
+      ? coreEntrySignatureInfo(coreEntry)
+      : [];
+
+  if (signatures.length === 0) {
+    return undefined;
+  }
+
+  const firstSignatureParams = signatures[0].parameters ?? [];
+  const activeParameter = firstSignatureParams.length > 0
+    ? Math.min(ctx.argumentIndex, firstSignatureParams.length - 1)
+    : 0;
+
   return {
-    contents: {
-      kind: 'markdown',
-      value: hoverText(entry),
-    },
+    signatures,
+    activeSignature: 0,
+    activeParameter,
   };
 });
 
 connection.onDefinition((params): Location[] | undefined => {
   const text = openDocuments.get(params.textDocument.uri) ?? '';
   const offset = positionToOffset(text, params.position.line, params.position.character);
-  const symbol = wordAt(text, offset);
+  const symbol = symbolAtOrNearOffset(text, offset);
   if (!symbol) {
     return undefined;
   }
 
   const version = getDocumentVersion(params.textDocument.uri);
+  const userEntry = userFunctionIndexByVersion[version].get(symbol.toUpperCase());
+  if (userEntry?.definitionUri) {
+    return [createDefinitionLocation(userEntry.definitionUri, userEntry.definitionLine ?? 0, symbol)];
+  }
   const entry = getIndex(version).get(symbol.toUpperCase());
   if (entry?.definitionUri) {
     return [createDefinitionLocation(entry.definitionUri, entry.definitionLine ?? 0, symbol)];
@@ -976,9 +1532,15 @@ connection.onDocumentSymbol((params): DocumentSymbol[] => {
 });
 
 documents.onDidSave(async (event) => {
+  const savedPath = uriToPath(event.document.uri);
+  const ext = path.extname(savedPath).toLowerCase();
+  if (ext === '.prg' || ext === '.inc' || ext === '.h' || ext === '.c') {
+    rebuildIndex();
+  }
+
   const version = getDocumentVersion(event.document.uri);
   const liveDiagnostics = collectLiveDiagnostics(event.document.getText(), version);
-  const compilerDiagnostics = parseDiagnostics(await compileForDiagnostics(uriToPath(event.document.uri), version));
+  const compilerDiagnostics = parseDiagnostics(await compileForDiagnostics(savedPath, version));
   const diagnostics = [...liveDiagnostics, ...compilerDiagnostics];
   connection.sendDiagnostics({
     uri: event.document.uri,
